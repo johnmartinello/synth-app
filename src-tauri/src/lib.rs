@@ -56,6 +56,7 @@ fn get_status() -> HostStatus {
         presets_supported: false,
         current_preset: None,
         current_preset_path: None,
+        midi_sink: "app".into(),
         sustain: false,
         octave: 4,
         arp_enabled: false,
@@ -358,6 +359,11 @@ fn close_editor(state: tauri::State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_performance_input(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
+    send_cmd(&state, HostCommand::SetPerformanceInput { enabled })
+}
+
+#[tauri::command]
 fn save_plugin_state(state: tauri::State<AppState>) -> Result<(), String> {
     send_cmd(&state, HostCommand::SaveState)
 }
@@ -429,6 +435,7 @@ pub fn run() {
             strum,
             open_editor,
             close_editor,
+            set_performance_input,
             save_plugin_state,
             load_plugin_state,
             list_presets,

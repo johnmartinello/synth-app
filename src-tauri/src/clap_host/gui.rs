@@ -4,9 +4,6 @@ use clack_extensions::gui::{
 };
 use clack_host::prelude::*;
 use std::error::Error;
-use winit::dpi::{LogicalSize, PhysicalSize, Size};
-use winit::event_loop::EventLoop;
-use winit::window::Window;
 
 impl HostGuiImpl for CpalHostShared {
     fn resize_hints_changed(&self) {}
@@ -53,7 +50,6 @@ impl Gui {
         plugin: &PluginMainThreadHandle<'_>,
     ) -> Option<GuiConfiguration<'static>> {
         let api_type = GuiApiType::default_for_current_platform()?;
-        // Prefer a separate floating native window (not the Tauri webview).
         let mut config = GuiConfiguration {
             api_type,
             is_floating: true,
@@ -66,26 +62,6 @@ impl Gui {
             Some(config)
         } else {
             None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn gui_size_to_winit_size(&self, size: GuiSize) -> Size {
-        let Some(GuiConfiguration { api_type, .. }) = self.configuration else {
-            panic!("GUI size on incompatible plugin");
-        };
-        if api_type.uses_logical_size() {
-            LogicalSize {
-                width: size.width,
-                height: size.height,
-            }
-            .into()
-        } else {
-            PhysicalSize {
-                width: size.width,
-                height: size.height,
-            }
-            .into()
         }
     }
 
@@ -112,73 +88,53 @@ impl Gui {
         Ok(())
     }
 
-    #[allow(unsafe_code, deprecated)]
-    pub fn open_embedded(
+    pub fn begin_embedded(
         &mut self,
         plugin: &PluginMainThreadHandle<'_>,
-        event_loop: &EventLoop<()>,
-    ) -> Result<Window, Box<dyn Error>> {
-        let gui = self.plugin_gui;
+    ) -> Result<GuiSize, Box<dyn Error>> {
         let Some(configuration) = self.configuration else {
-            panic!("open_embedded on incompatible plugin");
+            return Err("Plugin has no GUI".into());
         };
         if configuration.is_floating {
-            panic!("open_embedded on incompatible plugin");
+            return Err("Plugin GUI is floating, not embedded".into());
         }
-        gui.create(plugin, configuration)?;
-        let initial_size = gui.get_size(plugin).unwrap_or(GuiSize {
+        self.plugin_gui.create(plugin, configuration)?;
+        self.is_open = true;
+        let initial_size = self.plugin_gui.get_size(plugin).unwrap_or(GuiSize {
             width: 960,
             height: 700,
         });
-        self.is_resizeable = gui.can_resize(plugin);
-        let window = event_loop.create_window(
-            Window::default_attributes()
-                .with_title("Surge XT")
-                .with_inner_size(PhysicalSize {
-                    height: initial_size.height,
-                    width: initial_size.width,
-                })
-                .with_resizable(self.is_resizeable),
-        )?;
-        unsafe {
-            gui.set_parent(plugin, ClapWindow::from_window(&window).unwrap())?;
-        }
-        let _ = gui.show(plugin);
-        self.is_open = true;
-        Ok(window)
+        self.is_resizeable = self.plugin_gui.can_resize(plugin);
+        Ok(initial_size)
     }
 
-    #[allow(dead_code)]
-    pub fn resize(
+    #[allow(unsafe_code)]
+    #[cfg(windows)]
+    pub unsafe fn attach_win32(
         &mut self,
         plugin: &PluginMainThreadHandle<'_>,
-        size: PhysicalSize<u32>,
-        scale_factor: f64,
-    ) -> Size {
-        let uses_logical_pixels = self.configuration.unwrap().api_type.uses_logical_size();
-        let size = if uses_logical_pixels {
-            let size = size.to_logical(scale_factor);
-            GuiSize {
-                width: size.width,
-                height: size.height,
-            }
-        } else {
-            GuiSize {
-                width: size.width,
-                height: size.height,
-            }
-        };
+        hwnd: *mut std::ffi::c_void,
+    ) -> Result<(), Box<dyn Error>> {
+        unsafe {
+            self.plugin_gui
+                .set_parent(plugin, ClapWindow::from_win32_hwnd(hwnd))?;
+        }
+        let _ = self.plugin_gui.show(plugin);
+        self.is_open = true;
+        Ok(())
+    }
+
+    pub fn apply_host_resize(&mut self, plugin: &PluginMainThreadHandle<'_>, size: GuiSize) {
         if !self.is_resizeable {
-            let forced_size = self.plugin_gui.get_size(plugin).unwrap_or(size);
-            return self.gui_size_to_winit_size(forced_size);
+            return;
         }
         let working_size = self.plugin_gui.adjust_size(plugin, size).unwrap_or(size);
         let _ = self.plugin_gui.set_size(plugin, working_size);
-        self.gui_size_to_winit_size(working_size)
     }
 
     pub fn destroy(&mut self, plugin: &PluginMainThreadHandle<'_>) {
         if self.is_open {
+            let _ = self.plugin_gui.hide(plugin);
             self.plugin_gui.destroy(plugin);
             self.is_open = false;
         }

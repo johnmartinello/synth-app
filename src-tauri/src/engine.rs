@@ -122,6 +122,10 @@ pub enum EngineEvent {
     },
     Looper(LooperEvent),
     Metronome(MetronomeEvent),
+    /// Channel MIDI forwarded straight to the plugin (Surge-focused).
+    MidiRaw {
+        bytes: [u8; 3],
+    },
 }
 
 /// Whole-millisecond roll range (UI step is 1 ms).
@@ -643,6 +647,7 @@ impl AudioEngine {
             }
             EngineEvent::Looper(_) => {}
             EngineEvent::Metronome(_) => {}
+            EngineEvent::MidiRaw { .. } => {}
         }
     }
 

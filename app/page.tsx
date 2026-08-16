@@ -34,6 +34,7 @@ type HostStatus = {
   presets_supported: boolean;
   current_preset: string | null;
   current_preset_path: string | null;
+  midi_sink?: string;
   sustain: boolean;
   octave?: number;
   arp_enabled?: boolean;
@@ -511,6 +512,7 @@ export default function Home() {
       return map[e.code] ?? null;
     };
     const down = (e: KeyboardEvent) => {
+      if (configOpen) return;
       const degree = digitDegree(e);
       if (degree != null && !e.repeat && !typingField(e.target)) {
         e.preventDefault();
@@ -526,6 +528,7 @@ export default function Home() {
       invoke("set_sustain_hold", { enabled: true }).catch(() => undefined);
     };
     const up = (e: KeyboardEvent) => {
+      if (configOpen) return;
       const degree = digitDegree(e);
       if (degree != null && !typingField(e.target)) {
         padUp(degree);
@@ -546,7 +549,7 @@ export default function Home() {
       window.removeEventListener("blur", clear);
       clear();
     };
-  }, [padDown, padUp]);
+  }, [padDown, padUp, configOpen]);
 
   const missing = status && !status.surge.found;
 
@@ -555,10 +558,17 @@ export default function Home() {
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Surge Chord</h1>
         <div className="flex items-center gap-2">
+          {status?.editor_open && (
+            <Silk>
+              MIDI {status.midi_sink === "surge" ? "→ Surge" : "→ Chord"}
+            </Silk>
+          )}
           <HwButton
             className="hw-btn-icon"
             aria-label="Config"
             onClick={() => {
+              setHeld(new Set());
+              setArmed(null);
               setConfigOpen(true);
               refreshPorts();
             }}
@@ -1090,6 +1100,15 @@ function packKey(bank: string, pack: string) {
   return `${bank}::${pack}`;
 }
 
+function normalizePatchPath(path: string) {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function samePatchPath(a: string | null | undefined, b: string | null | undefined) {
+  if (!a || !b) return false;
+  return a === b || normalizePatchPath(a) === normalizePatchPath(b);
+}
+
 function PatchBar({
   currentPath,
   currentLabel,
@@ -1121,7 +1140,7 @@ function PatchBar({
   }, [refresh]);
 
   const current = useMemo(
-    () => presets.find((p) => p.path === currentPath) ?? null,
+    () => presets.find((p) => samePatchPath(p.path, currentPath)) ?? null,
     [presets, currentPath],
   );
 
@@ -1219,7 +1238,7 @@ function PatchBar({
 
   const step = (dir: -1 | 1) => {
     if (!filtered.length) return;
-    const idx = filtered.findIndex((p) => p.path === currentPath);
+    const idx = filtered.findIndex((p) => samePatchPath(p.path, currentPath));
     const next =
       idx < 0
         ? dir > 0
@@ -1368,7 +1387,7 @@ function PatchBar({
                   <button
                     type="button"
                     className="patch-item"
-                    data-on={p.path === currentPath ? "true" : undefined}
+                    data-on={samePatchPath(p.path, currentPath) ? "true" : undefined}
                     disabled={disabled}
                     onClick={() => load(p.path)}
                   >
@@ -1396,11 +1415,16 @@ function ConfigModal({
   onRefreshPorts: () => void;
 }) {
   useEffect(() => {
+    invoke("set_performance_input", { enabled: false }).catch(() => undefined);
+    invoke("cancel_midi_learn").catch(() => undefined);
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      invoke("set_performance_input", { enabled: true }).catch(() => undefined);
+    };
   }, [onClose]);
 
   const selectPort = (name: string) => {

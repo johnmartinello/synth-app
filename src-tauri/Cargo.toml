@@ -43,4 +43,10 @@ wmidi = "4"
 crossbeam-channel = "0.5"
 
 # Windows/macOS backends are cfg-gated; do not pull Linux x11-only defaults.
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

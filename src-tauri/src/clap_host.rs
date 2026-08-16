@@ -1,5 +1,6 @@
 //! CLAP host: plugin instance, GUI, timers, and the dedicated main thread.
 
+mod editor;
 mod gui;
 mod timer;
 
@@ -31,6 +32,7 @@ use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_extensions::timer::{HostTimer, PluginTimer};
 use clack_host::prelude::*;
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use editor::EditorFrame;
 use gui::Gui;
 use midir::MidiInputConnection;
 use rtrb::{Producer, RingBuffer};
@@ -46,18 +48,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use timer::Timers;
-use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize, Size};
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-use winit::window::{Window, WindowId};
 use wmidi::MidiMessage;
 
 pub enum MainThreadMessage {
     RunOnMainThread,
     GuiClosed,
     GuiRequestResized { new_size: GuiSize },
+    PresetLoaded { path: String, key: Option<String> },
+    /// Surge does not report GUI patch picks via preset-load; clap-juce maps
+    /// `patchChanged` to `mark_dirty` / param rescan instead.
+    PluginPatchMaybeChanged,
 }
 
 pub struct CpalHost;
@@ -170,7 +170,14 @@ impl HostNotePortsImpl for CpalHostMainThread<'_> {
 }
 
 impl HostParamsImplMainThread for CpalHostMainThread<'_> {
-    fn rescan(&self, _flags: ParamRescanFlags) {}
+    fn rescan(&self, flags: ParamRescanFlags) {
+        if flags.intersects(ParamRescanFlags::INFO | ParamRescanFlags::VALUES) {
+            let _ = self
+                ._shared
+                .sender
+                .send(MainThreadMessage::PluginPatchMaybeChanged);
+        }
+    }
     fn clear(&self, _param_id: ClapId, _flags: ParamClearFlags) {}
 }
 
@@ -179,7 +186,12 @@ impl HostParamsImplShared for CpalHostShared {
 }
 
 impl HostStateImpl for CpalHostMainThread<'_> {
-    fn mark_dirty(&self) {}
+    fn mark_dirty(&self) {
+        let _ = self
+            ._shared
+            .sender
+            .send(MainThreadMessage::PluginPatchMaybeChanged);
+    }
 }
 
 impl HostPresetLoadImpl for CpalHostMainThread<'_> {
@@ -198,12 +210,17 @@ impl HostPresetLoadImpl for CpalHostMainThread<'_> {
         log::error!("Surge preset error ({os_error}) {path}: {msg}");
     }
 
-    fn loaded(&self, location: Location, _load_key: Option<&CStr>) {
+    fn loaded(&self, location: Location, load_key: Option<&CStr>) {
         let path = location
             .file_path()
-            .map(|p| p.to_string_lossy())
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let key = load_key.map(|k| k.to_string_lossy().into_owned());
         log::info!("Surge preset loaded: {path}");
+        let _ = self
+            ._shared
+            .sender
+            .send(MainThreadMessage::PresetLoaded { path, key });
     }
 }
 
@@ -258,6 +275,9 @@ pub enum HostCommand {
     },
     OpenEditor,
     CloseEditor,
+    SetPerformanceInput {
+        enabled: bool,
+    },
     OpenMidi {
         port_name: String,
     },
@@ -340,6 +360,8 @@ pub struct HostStatus {
     pub presets_supported: bool,
     pub current_preset: Option<String>,
     pub current_preset_path: Option<String>,
+    #[serde(default)]
+    pub midi_sink: String,
     pub sustain: bool,
     pub octave: i8,
     pub arp_enabled: bool,
@@ -448,21 +470,6 @@ impl MetronomeSettings {
     }
 }
 
-struct GuiPump {
-    close: bool,
-}
-
-impl ApplicationHandler for GuiPump {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed) {
-            self.close = true;
-            event_loop.exit();
-        }
-    }
-}
-
 fn host_info() -> HostInfo {
     HostInfo::new("Surge Chord", "synth-app", "https://github.com", "0.1.0").unwrap()
 }
@@ -501,9 +508,147 @@ fn remembered_preset(app: &AppHandle) -> Option<String> {
     }
 }
 
+fn drain_plugin_messages(
+    plugin_rx: &Receiver<MainThreadMessage>,
+    instance: &mut PluginInstance<CpalHost>,
+    gui: &mut Option<Gui>,
+    editor: &mut Option<EditorFrame>,
+    status: &mut HostStatus,
+    app: &AppHandle,
+    patch_sync_at: &mut Option<Instant>,
+) {
+    while let Ok(message) = plugin_rx.try_recv() {
+        match message {
+            MainThreadMessage::RunOnMainThread => instance.call_on_main_thread_callback(),
+            MainThreadMessage::GuiClosed => {
+                close_plugin_editor(instance, gui, editor, status, app);
+            }
+            MainThreadMessage::GuiRequestResized { new_size } => {
+                if let Some(frame) = editor.as_ref() {
+                    frame.request_resize(new_size);
+                }
+            }
+            MainThreadMessage::PresetLoaded { path, key } => {
+                apply_plugin_preset(app, status, &path, key.as_deref());
+            }
+            MainThreadMessage::PluginPatchMaybeChanged => {
+                *patch_sync_at = Some(Instant::now());
+            }
+        }
+    }
+}
+
 fn apply_remembered_preset(status: &mut HostStatus, path: &str) {
+    if let Some(info) = crate::presets::resolve_path(&crate::presets::list_all(), path) {
+        status.current_preset_path = Some(info.path.clone());
+        status.current_preset = Some(info.label());
+        return;
+    }
     status.current_preset_path = Some(path.to_string());
     status.current_preset = Some(crate::presets::display_name_for(path));
+}
+
+fn apply_plugin_preset(
+    app: &AppHandle,
+    status: &mut HostStatus,
+    path: &str,
+    key: Option<&str>,
+) {
+    let presets = crate::presets::list_all();
+    if let Some(info) = crate::presets::resolve_path(&presets, path) {
+        apply_matched_preset(app, status, info);
+        return;
+    }
+    if !path.is_empty() {
+        remember_preset(app, path);
+        apply_remembered_preset(status, path);
+        emit_status(app, status);
+        return;
+    }
+    if let Some(key) = key.filter(|k| !k.is_empty()) {
+        if let Some((category, name)) = key.rsplit_once('/') {
+            apply_patch_identity(
+                app,
+                status,
+                &presets,
+                &crate::presets::PatchIdentity {
+                    name: name.to_string(),
+                    category: category.to_string(),
+                },
+            );
+            return;
+        }
+        status.current_preset = Some(key.to_string());
+        status.current_preset_path = None;
+        emit_status(app, status);
+    }
+}
+
+fn apply_matched_preset(
+    app: &AppHandle,
+    status: &mut HostStatus,
+    info: &crate::presets::PresetInfo,
+) {
+    let label = info.label();
+    if status
+        .current_preset_path
+        .as_deref()
+        .is_some_and(|p| crate::presets::paths_match(p, &info.path))
+        && status.current_preset.as_deref() == Some(label.as_str())
+    {
+        return;
+    }
+    remember_preset(app, &info.path);
+    status.current_preset_path = Some(info.path.clone());
+    status.current_preset = Some(label);
+    emit_status(app, status);
+}
+
+fn apply_patch_identity(
+    app: &AppHandle,
+    status: &mut HostStatus,
+    presets: &[crate::presets::PresetInfo],
+    identity: &crate::presets::PatchIdentity,
+) {
+    if let Some(info) = crate::presets::resolve_identity(presets, identity) {
+        apply_matched_preset(app, status, info);
+        return;
+    }
+    let label = identity.label();
+    if status.current_preset.as_deref() == Some(label.as_str())
+        && status.current_preset_path.is_none()
+    {
+        return;
+    }
+    status.current_preset = Some(label);
+    status.current_preset_path = None;
+    emit_status(app, status);
+}
+
+fn snapshot_plugin_state(
+    instance: &mut PluginInstance<CpalHost>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let ext = instance
+        .access_handler(|h| h.state_ext.get())
+        .ok_or("Plugin does not support CLAP state")?;
+    let mut buf = Vec::new();
+    ext.save(&mut instance.plugin_handle(), &mut buf)?;
+    Ok(buf)
+}
+
+fn sync_patch_from_plugin(
+    instance: &mut PluginInstance<CpalHost>,
+    app: &AppHandle,
+    status: &mut HostStatus,
+) {
+    let Ok(blob) = snapshot_plugin_state(instance) else {
+        return;
+    };
+    let Some(identity) = crate::presets::parse_surge_meta(&blob) else {
+        return;
+    };
+    let presets = crate::presets::list_all();
+    apply_patch_identity(app, status, &presets, &identity);
 }
 
 fn emit_strum_ui(app: Option<&AppHandle>, position: f32, active: bool) {
@@ -628,6 +773,7 @@ fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
 const CC_ARP: u8 = 102;
 const MIDI_CLOCK_PPQN: f64 = 24.0;
 const MIDI_CLOCK_TIMEOUT: Duration = Duration::from_millis(400);
+const PATCH_SYNC_DELAY: Duration = Duration::from_millis(150);
 
 struct MidiClock {
     last: Option<Instant>,
@@ -899,6 +1045,7 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         presets_supported: false,
         current_preset: None,
         current_preset_path: None,
+        midi_sink: "app".into(),
         sustain: false,
         octave: 4,
         arp_enabled: false,
@@ -984,8 +1131,10 @@ fn run_with_plugin(
     let mut gui = instance
         .access_handler(|h| h.gui.get())
         .map(|g| Gui::new(g, &instance.plugin_handle()));
-    let mut event_loop: Option<EventLoop<()>> = None;
-    let mut window: Option<Window> = None;
+    let mut editor: Option<EditorFrame> = None;
+    let mut midi_muted = false;
+    let mut midi_to_surge = false;
+    let app_hwnd = tauri_hwnd(&app);
     let mut settings = EngineSettings::default();
     let mut envelope = EnvelopeParams::default();
     let mut midi_conn: Option<MidiInputConnection<u8>> = None;
@@ -1008,6 +1157,7 @@ fn run_with_plugin(
     let mut metro = MetronomeSettings::default();
     copy_looper_controls(status, &looper);
     copy_metro(status, &metro);
+    let mut patch_sync_at: Option<Instant> = None;
 
     loop {
         while let Ok(bytes) = midi_bytes_rx.try_recv() {
@@ -1024,6 +1174,8 @@ fn run_with_plugin(
                 &mut metro,
                 status,
                 Some(&app),
+                midi_muted,
+                midi_to_surge,
             );
         }
         if midi_clock.poll_timeout() {
@@ -1066,8 +1218,9 @@ fn run_with_plugin(
                 &mut envelope,
                 &mut learn,
                 &mut gui,
-                &mut event_loop,
-                &mut window,
+                &mut editor,
+                &mut midi_muted,
+                midi_to_surge,
                 &mut midi_conn,
                 &midi_bytes_tx,
                 &mut midi_pads,
@@ -1091,8 +1244,9 @@ fn run_with_plugin(
                 &mut envelope,
                 &mut learn,
                 &mut gui,
-                &mut event_loop,
-                &mut window,
+                &mut editor,
+                &mut midi_muted,
+                midi_to_surge,
                 &mut midi_conn,
                 &midi_bytes_tx,
                 &mut midi_pads,
@@ -1104,41 +1258,15 @@ fn run_with_plugin(
             );
         }
 
-        while let Ok(message) = plugin_rx.try_recv() {
-            match message {
-                MainThreadMessage::RunOnMainThread => instance.call_on_main_thread_callback(),
-                MainThreadMessage::GuiClosed => {
-                    if let Some(g) = gui.as_mut() {
-                        g.destroy(&instance.plugin_handle());
-                    }
-                    window = None;
-                    status.editor_open = false;
-                    emit_status(&app, status);
-                }
-                MainThreadMessage::GuiRequestResized { new_size } => {
-                    if let (Some(g), Some(win)) = (gui.as_ref(), window.as_ref()) {
-                        let uses_logical = g
-                            .configuration
-                            .map(|c| c.api_type.uses_logical_size())
-                            .unwrap_or(false);
-                        let size: Size = if uses_logical {
-                            LogicalSize {
-                                width: new_size.width,
-                                height: new_size.height,
-                            }
-                            .into()
-                        } else {
-                            PhysicalSize {
-                                width: new_size.width,
-                                height: new_size.height,
-                            }
-                            .into()
-                        };
-                        let _ = win.request_inner_size(size);
-                    }
-                }
-            }
-        }
+        drain_plugin_messages(
+            &plugin_rx,
+            &mut instance,
+            &mut gui,
+            &mut editor,
+            status,
+            &app,
+            &mut patch_sync_at,
+        );
 
         let timers =
             instance.access_handler(|h| h.timer_support.get().map(|ext| (h.timers.clone(), ext)));
@@ -1146,19 +1274,50 @@ fn run_with_plugin(
             timers.tick_timers(timer_ext, &instance.plugin_handle());
         }
 
-        if window.is_some() {
-            if let Some(el) = event_loop.as_mut() {
-                let mut pump = GuiPump { close: false };
-                let pumped = el.pump_app_events(Some(Duration::ZERO), &mut pump);
-                if pump.close || matches!(pumped, PumpStatus::Exit(_)) {
-                    if let Some(g) = gui.as_mut() {
-                        g.destroy(&instance.plugin_handle());
-                    }
-                    window = None;
-                    status.editor_open = false;
-                    emit_status(&app, status);
-                }
+        let mut editor_closed = false;
+        if let Some(frame) = editor.as_mut() {
+            let event = frame.pump();
+            if let (Some(size), Some(g)) = (event.resize, gui.as_mut()) {
+                g.apply_host_resize(&instance.plugin_handle(), size);
             }
+            editor_closed = event.closed;
+        }
+        if editor_closed {
+            close_plugin_editor(&mut instance, &mut gui, &mut editor, status, &app);
+        }
+
+        drain_plugin_messages(
+            &plugin_rx,
+            &mut instance,
+            &mut gui,
+            &mut editor,
+            status,
+            &app,
+            &mut patch_sync_at,
+        );
+
+        if patch_sync_at.is_some_and(|at| at.elapsed() >= PATCH_SYNC_DELAY) {
+            patch_sync_at = None;
+            sync_patch_from_plugin(&mut instance, &app, status);
+        }
+
+        let want_surge = editor.is_some()
+            && editor::midi_targets_surge(
+                app_hwnd,
+                editor.as_ref().and_then(|e| e.hwnd_raw()),
+                midi_to_surge,
+            );
+        if want_surge != midi_to_surge {
+            midi_to_surge = want_surge;
+            set_midi_sink(
+                midi_to_surge,
+                &mut engine_prod,
+                &mut learn,
+                &mut midi_pads,
+                &mut held_pads,
+                status,
+                &app,
+            );
         }
 
         emit_notes_ui(&app, &mut last_notes);
@@ -1166,7 +1325,11 @@ fn run_with_plugin(
         emit_looper_ui(&app, &mut last_looper, status);
     }
 
-    if let Some(g) = gui.as_mut() {
+    if let Some(frame) = editor.take() {
+        if let Some(g) = gui.as_mut() {
+            frame.close(g, &instance.plugin_handle());
+        }
+    } else if let Some(g) = gui.as_mut() {
         g.destroy(&instance.plugin_handle());
     }
     Ok(())
@@ -1185,8 +1348,25 @@ fn handle_incoming_midi(
     metro: &mut MetronomeSettings,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
+    muted: bool,
+    to_surge: bool,
 ) {
+    if muted {
+        return;
+    }
     let slice = bytes.as_slice();
+    if to_surge {
+        handle_surge_midi(
+            slice,
+            settings,
+            prod,
+            midi_clock,
+            metro,
+            status,
+            app,
+        );
+        return;
+    }
     if slice.len() == 1 {
         if midi_learn::is_learnable_realtime(slice[0]) {
             handle_learned_source(
@@ -1551,6 +1731,62 @@ fn handle_midi_note_off(
     }
 }
 
+fn handle_surge_midi(
+    slice: &[u8],
+    settings: &mut EngineSettings,
+    prod: &mut Producer<EngineEvent>,
+    midi_clock: &mut MidiClock,
+    metro: &mut MetronomeSettings,
+    status: &mut HostStatus,
+    app: Option<&AppHandle>,
+) {
+    if slice.len() == 1 {
+        handle_midi_realtime(slice[0], settings, prod, midi_clock, metro, status, app);
+        return;
+    }
+    if slice.len() > 3 {
+        return;
+    }
+    let mut bytes = [0u8; 3];
+    bytes[..slice.len()].copy_from_slice(slice);
+    push_engine(prod, EngineEvent::MidiRaw { bytes });
+}
+
+fn set_midi_sink(
+    to_surge: bool,
+    prod: &mut Producer<EngineEvent>,
+    learn: &mut MidiLearnState,
+    midi_pads: &mut MidiPadState,
+    held_pads: &mut Vec<u8>,
+    status: &mut HostStatus,
+    app: &AppHandle,
+) {
+    crate::audio::set_host_insert_bypass(to_surge);
+    status.midi_sink = if to_surge { "surge" } else { "app" }.into();
+    learn.cancel();
+    held_pads.clear();
+    midi_pads.clear();
+    push_engine(prod, EngineEvent::Panic);
+    status.test_c_playing = false;
+    copy_learn(status, learn);
+    emit_pads_ui(Some(app), held_pads);
+    emit_status(app, status);
+}
+
+fn tauri_hwnd(app: &AppHandle) -> Option<isize> {
+    #[cfg(windows)]
+    {
+        let window = app.get_webview_window("main")?;
+        let hwnd = window.hwnd().ok()?;
+        Some(hwnd.0 as isize)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 fn press_degree(
     held_pads: &mut Vec<u8>,
     degree: u8,
@@ -1598,8 +1834,9 @@ fn handle_command(
     envelope: &mut EnvelopeParams,
     learn: &mut MidiLearnState,
     gui: &mut Option<Gui>,
-    event_loop: &mut Option<EventLoop<()>>,
-    window: &mut Option<Window>,
+    editor: &mut Option<EditorFrame>,
+    midi_muted: &mut bool,
+    midi_to_surge: bool,
     midi_conn: &mut Option<MidiInputConnection<u8>>,
     midi_bytes_tx: &Sender<MidiBytes>,
     midi_pads: &mut MidiPadState,
@@ -1625,6 +1862,8 @@ fn handle_command(
                 metro,
                 status,
                 Some(app),
+                *midi_muted,
+                midi_to_surge,
             );
         }
         HostCommand::NoteOn { key, vel } => {
@@ -1798,7 +2037,7 @@ fn handle_command(
             }
         }
         HostCommand::OpenEditor => {
-            if let Err(e) = open_editor(instance, gui, event_loop, window) {
+            if let Err(e) = open_plugin_editor(instance, gui, editor) {
                 status.message = Some(format!("Editor: {e}"));
             } else {
                 status.editor_open = true;
@@ -1807,12 +2046,25 @@ fn handle_command(
             emit_status(app, status);
         }
         HostCommand::CloseEditor => {
-            if let Some(g) = gui.as_mut() {
-                g.destroy(&instance.plugin_handle());
+            close_plugin_editor(instance, gui, editor, status, app);
+        }
+        HostCommand::SetPerformanceInput { enabled } => {
+            let mute = !enabled;
+            if mute == *midi_muted {
+                return;
             }
-            *window = None;
-            status.editor_open = false;
-            emit_status(app, status);
+            *midi_muted = mute;
+            if mute {
+                learn.cancel();
+                held_pads.clear();
+                midi_pads.clear();
+                push_engine(prod, EngineEvent::Panic);
+                status.test_c_playing = false;
+                status.message = None;
+                copy_learn(status, learn);
+                emit_pads_ui(Some(app), held_pads);
+                emit_status(app, status);
+            }
         }
         HostCommand::OpenMidi { port_name } => {
             *midi_conn = None;
@@ -1965,11 +2217,28 @@ fn handle_command(
     }
 }
 
-fn open_editor(
+fn close_plugin_editor(
     instance: &mut PluginInstance<CpalHost>,
     gui: &mut Option<Gui>,
-    event_loop: &mut Option<EventLoop<()>>,
-    window: &mut Option<Window>,
+    editor: &mut Option<EditorFrame>,
+    status: &mut HostStatus,
+    app: &AppHandle,
+) {
+    if let Some(frame) = editor.take() {
+        if let Some(g) = gui.as_mut() {
+            frame.close(g, &instance.plugin_handle());
+        }
+    } else if let Some(g) = gui.as_mut() {
+        g.destroy(&instance.plugin_handle());
+    }
+    status.editor_open = false;
+    emit_status(app, status);
+}
+
+fn open_plugin_editor(
+    instance: &mut PluginInstance<CpalHost>,
+    gui: &mut Option<Gui>,
+    editor: &mut Option<EditorFrame>,
 ) -> Result<(), Box<dyn Error>> {
     let Some(g) = gui.as_mut() else {
         return Err("Plugin has no GUI".into());
@@ -1980,11 +2249,7 @@ fn open_editor(
     match g.needs_floating() {
         Some(true) => g.open_floating(&instance.plugin_handle())?,
         Some(false) => {
-            if event_loop.is_none() {
-                *event_loop = Some(EventLoop::new()?);
-            }
-            let el = event_loop.as_ref().unwrap();
-            *window = Some(g.open_embedded(&instance.plugin_handle(), el)?);
+            *editor = Some(EditorFrame::open(g, &instance.plugin_handle())?);
         }
         None => return Err("No compatible GUI API (Win32/Cocoa/X11)".into()),
     }

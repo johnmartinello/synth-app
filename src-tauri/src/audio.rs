@@ -11,6 +11,8 @@ use crate::looper::{Looper, LooperStatus};
 use crate::metronome::{self, Metronome, MetronomeEvent};
 use crate::midi;
 use buffers::HostAudioBuffers;
+use clack_host::events::event_types::MidiEvent;
+use clack_host::events::EventFlags;
 use clack_host::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
@@ -20,9 +22,14 @@ use rtrb::Consumer;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::f32::consts::{FRAC_1_SQRT_2, PI};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-/// 1.0 = open (IEEE bits of 1.0f32).
+static HOST_INSERT_BYPASS: AtomicBool = AtomicBool::new(false);
+
+/// When true, skip host envelope/filter so Surge is heard dry (editor focused).
+pub fn set_host_insert_bypass(on: bool) {
+    HOST_INSERT_BYPASS.store(on, Ordering::Relaxed);
+}
 static FILTER_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000);
 static FILTER_RES_BITS: AtomicU32 = AtomicU32::new(0);
 static FILTER_MODE_BITS: AtomicU32 = AtomicU32::new(0);
@@ -258,6 +265,7 @@ struct StreamAudioProcessor {
     midi_clock_on: bool,
     events: EventBuffer,
     generated: Vec<GeneratedNote>,
+    raw_midi: Vec<[u8; 3]>,
     note_port: Option<(u16, bool)>,
     steady_counter: u64,
     svf: Svf,
@@ -282,6 +290,7 @@ impl StreamAudioProcessor {
             midi_clock_on: false,
             events: EventBuffer::with_capacity(256),
             generated: Vec::with_capacity(64),
+            raw_midi: Vec::with_capacity(32),
             note_port,
             steady_counter: 0,
             svf: Svf::new(sample_rate),
@@ -293,8 +302,10 @@ impl StreamAudioProcessor {
         let sample_count = self.buffers.cpal_buf_len_to_frame_count(data.len());
 
         self.generated.clear();
+        self.raw_midi.clear();
         while let Ok(ev) = self.engine_consumer.pop() {
             match ev {
+                EngineEvent::MidiRaw { bytes } => self.raw_midi.push(bytes),
                 EngineEvent::Looper(cmd) => {
                     self.looper.handle(cmd);
                     self.sync_looper_clock();
@@ -320,6 +331,11 @@ impl StreamAudioProcessor {
 
         self.events.clear();
         if let Some((port, prefers_midi)) = self.note_port {
+            for bytes in &self.raw_midi {
+                self.events.push(
+                    &MidiEvent::new(0, port, *bytes).with_flags(EventFlags::IS_LIVE),
+                );
+            }
             for n in &self.generated {
                 midi::push_note(
                     &mut self.events,
@@ -344,14 +360,19 @@ impl StreamAudioProcessor {
             None,
         ) {
             Ok(_) => {
-                self.svf
-                    .set_params(filter_norm(), filter_res(), filter_mode());
+                let bypass = HOST_INSERT_BYPASS.load(Ordering::Relaxed);
+                if !bypass {
+                    self.svf
+                        .set_params(filter_norm(), filter_res(), filter_mode());
+                }
                 let svf = &mut self.svf;
                 let looper = &mut self.looper;
                 let metro = &mut self.metro;
                 self.buffers.write_to_cpal_buffer(data, |buf, ch| {
-                    svf.process_interleaved(buf, ch);
-                    apply_env_gain(buf, ch, env_start, env_end);
+                    if !bypass {
+                        svf.process_interleaved(buf, ch);
+                        apply_env_gain(buf, ch, env_start, env_end);
+                    }
                     metronome::process_looper_with_metro(metro, looper, buf, ch);
                 });
             }
