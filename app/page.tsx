@@ -58,9 +58,10 @@ const DEGREES = [
   { n: 6, roman: "vi" },
   { n: 7, roman: "vii°" },
 ];
-type ChordType = "tri" | "7" | "9" | "11" | "13";
+type ChordType = "1" | "tri" | "7" | "9" | "11" | "13";
 type Secondary = "none" | "v" | "iv" | "vii";
 const CHORD_TYPES: ReadonlyArray<readonly [ChordType, string]> = [
+  ["1", "1"],
   ["tri", "tri"],
   ["7", "7"],
   ["9", "9"],
@@ -80,6 +81,7 @@ const SECONDARIES: ReadonlyArray<readonly [Secondary, string]> = [
   ["vii", "/vii°"],
 ];
 const TONE_COUNT: Record<ChordType, number> = {
+  "1": 1,
   tri: 3,
   "7": 4,
   "9": 5,
@@ -409,30 +411,26 @@ export default function Home() {
   }, [padDown, padUp]);
 
   const missing = status && !status.surge.found;
-  const subtitle = useMemo(() => {
-    if (!status) return "Starting host…";
-    if (status.message) return status.message;
-    if (missing) return status.surge.error ?? "Surge XT not found";
-    if (status.audio_ok) return "Rust audio host is live — pads send chords into Surge.";
-    return "Host running";
-  }, [status, missing]);
 
   return (
     <div className="flex min-h-screen flex-col px-5 py-4 md:px-7">
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <Silk className="silk-accent">Chord instrument</Silk>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Surge Chord</h1>
-          <p className="mt-1 max-w-xl text-xs text-[var(--muted)]">{subtitle}</p>
-        </div>
+        <h1 className="text-2xl font-semibold tracking-tight">Surge Chord</h1>
         <div className="flex items-center gap-2">
           <HwButton
+            className="hw-btn-icon"
+            aria-label="Config"
             onClick={() => {
               setConfigOpen(true);
               refreshPorts();
             }}
           >
-            Config
+            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96c-.5-.38-1.04-.7-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 13.94a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.24.1.51 0 .64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2Z"
+              />
+            </svg>
           </HwButton>
           <StatusLed status={status} />
         </div>
@@ -507,7 +505,9 @@ export default function Home() {
           label="Inv"
           value={String(inversion)}
           options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
-          disabledIds={chordType === "tri" ? ["3"] : []}
+          disabledIds={
+            chordType === "1" ? ["1", "2", "3"] : chordType === "tri" ? ["3"] : []
+          }
           onChange={(v) => setInversion(Number(v))}
         />
         <HwToggleGroup
@@ -633,6 +633,9 @@ export default function Home() {
             min={0}
             max={500}
             step={1}
+            disabled={
+              (held.size === 0 ? TONE_COUNT[chordType] : heldNotes.length) <= 1
+            }
             onChange={(v) => {
               setRollMs(v);
               invoke("set_roll", { ms: v }).catch(() => undefined);
@@ -1141,6 +1144,7 @@ function chordSymbol(
   const notes = harmonicNotes(root, scale, type, secondary, 4, degree);
   if (!notes.length) return "—";
   const name = NOTE_NAMES[notes[0] % 12];
+  if (type === "1") return name;
   const pcs = new Set(notes.map((n) => ((n - notes[0]) % 12 + 12) % 12));
   const min3 = pcs.has(3);
   const dim5 = pcs.has(6);

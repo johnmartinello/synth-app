@@ -13,9 +13,11 @@ pub enum ScaleKind {
     Minor,
 }
 
-/// Chord density: triad through 13th.
+/// Chord density: single scale tone through 13th.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChordType {
+    #[serde(rename = "1")]
+    Single,
     #[default]
     #[serde(rename = "tri")]
     Triad,
@@ -32,6 +34,7 @@ pub enum ChordType {
 impl ChordType {
     pub fn tone_count(self) -> usize {
         match self {
+            ChordType::Single => 1,
             ChordType::Triad => 3,
             ChordType::Seventh => 4,
             ChordType::Ninth => 5,
@@ -501,25 +504,29 @@ impl AudioEngine {
                     self.chord_latched = true;
                     return;
                 }
-                if self.strum_mode {
-                    let _ = self.env.gate_off();
-                    self.mute_strum_strings(time, out, !self.sustain);
-                    self.chord_len = 0;
-                    self.chord_latched = false;
-                    return;
-                }
                 if self.sustain {
                     let _ = self.env.gate_off();
-                    self.release_pattern(time, out, self.arp_enabled);
+                    if self.strum_mode {
+                        self.mute_strum_strings(time, out, false);
+                    } else {
+                        self.release_pattern(time, out, self.arp_enabled);
+                    }
                     self.chord_len = 0;
                     self.chord_latched = false;
                     return;
                 }
                 if self.begin_env_release(time, out) {
+                    if self.strum_mode {
+                        self.park_strum();
+                    }
                     self.chord_latched = false;
                     return;
                 }
-                self.release_pattern(time, out, self.arp_enabled);
+                if self.strum_mode {
+                    self.mute_strum_strings(time, out, true);
+                } else {
+                    self.release_pattern(time, out, self.arp_enabled);
+                }
                 self.chord_len = 0;
                 self.chord_latched = false;
             }
@@ -1053,6 +1060,9 @@ impl AudioEngine {
         if self.block_chord_on {
             self.release_block(time, out, true);
         }
+        if self.strum_mask != 0 || self.strum_origin.is_some() {
+            self.clear_strum(time, out);
+        }
         self.chord_len = 0;
         self.chord_latched = false;
     }
@@ -1194,6 +1204,35 @@ mod tests {
         assert_eq!(chord_notes_vec(&s, 2), vec![69, 73, 76]); // A
         s.chord_type = ChordType::Seventh;
         assert_eq!(chord_notes_vec(&s, 2), vec![69, 73, 76, 79]); // A7
+    }
+
+    #[test]
+    fn c_major_single_scale_tones() {
+        let mut s = EngineSettings::default();
+        s.chord_type = ChordType::Single;
+        assert_eq!(chord_notes_vec(&s, 1), vec![60]);
+        assert_eq!(chord_notes_vec(&s, 2), vec![62]);
+        assert_eq!(chord_notes_vec(&s, 3), vec![64]);
+        assert_eq!(chord_notes_vec(&s, 4), vec![65]);
+        assert_eq!(chord_notes_vec(&s, 5), vec![67]);
+        assert_eq!(chord_notes_vec(&s, 6), vec![69]);
+        assert_eq!(chord_notes_vec(&s, 7), vec![71]);
+    }
+
+    #[test]
+    fn single_ignores_inversion() {
+        let mut s = EngineSettings::default();
+        s.chord_type = ChordType::Single;
+        s.inversion = 3;
+        assert_eq!(chord_notes_vec(&s, 1), vec![60]);
+    }
+
+    #[test]
+    fn single_secondary_v_of_ii() {
+        let mut s = EngineSettings::default();
+        s.chord_type = ChordType::Single;
+        s.secondary = Secondary::V;
+        assert_eq!(chord_notes_vec(&s, 2), vec![69]); // A
     }
 
     #[test]
@@ -1489,6 +1528,42 @@ mod tests {
         assert!(out.is_empty());
         out.clear();
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
+        assert_eq!(offs, vec![60, 64, 67]);
+    }
+
+    #[test]
+    fn strum_release_defers_note_off() {
+        let mut eng = AudioEngine::new(1_000.0);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.0,
+                attack: 0.0,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.2,
+            },
+            0,
+            &mut out,
+        );
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
+        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        assert!(
+            out.iter().all(|n| n.on),
+            "strum pad-up must ride the release envelope"
+        );
+        out.clear();
+        eng.process_clock(100, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.process_clock(100, &mut out);
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         assert_eq!(offs, vec![60, 64, 67]);
     }

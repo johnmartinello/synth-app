@@ -195,6 +195,19 @@ export type HwKnobMidi = {
   onClear: () => void;
 };
 
+type HwKnobProps = {
+  label?: string;
+  display?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+  onChange: (v: number) => void;
+  onGestureChange?: (dragging: boolean) => void;
+  midi?: HwKnobMidi;
+};
+
 export function HwKnob({
   label,
   display,
@@ -202,20 +215,11 @@ export function HwKnob({
   min,
   max,
   step,
+  disabled = false,
   onChange,
   onGestureChange,
   midi,
-}: {
-  label?: string;
-  display?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (v: number) => void;
-  onGestureChange?: (dragging: boolean) => void;
-  midi?: HwKnobMidi;
-}) {
+}: HwKnobProps) {
   const id = useId();
   const drag = useRef<{ y: number; value: number } | null>(null);
   const span = Math.max(0.0001, max - min);
@@ -236,26 +240,29 @@ export function HwKnob({
     : null;
 
   return (
-    <div className="hw-knob">
+    <div className="hw-knob" data-disabled={disabled ? "true" : undefined}>
       {label ? <Silk>{label}</Silk> : null}
       <div className="hw-knob-dial">
         <div
           id={id}
           className="hw-knob-face"
           role="slider"
-          tabIndex={0}
+          tabIndex={disabled ? -1 : 0}
+          aria-disabled={disabled || undefined}
           aria-label={label ?? display ?? "Knob"}
           aria-valuemin={min}
           aria-valuemax={max}
           aria-valuenow={value}
           aria-valuetext={display}
           onPointerDown={(e) => {
+            if (disabled) return;
             e.preventDefault();
             e.currentTarget.setPointerCapture(e.pointerId);
             drag.current = { y: e.clientY, value };
             onGestureChange?.(true);
           }}
           onPointerMove={(e) => {
+            if (disabled) return;
             const start = drag.current;
             if (!start) return;
             const fine = e.shiftKey ? 0.15 : 1;
@@ -276,12 +283,14 @@ export function HwKnob({
             onGestureChange?.(false);
           }}
           onWheel={(e) => {
+            if (disabled) return;
             e.preventDefault();
             const dir = e.deltaY > 0 ? -1 : 1;
             const fine = e.shiftKey ? 0.25 : 1;
             apply(value + dir * step * fine);
           }}
           onKeyDown={(e) => {
+            if (disabled) return;
             if (e.key === "ArrowUp" || e.key === "ArrowRight") {
               e.preventDefault();
               apply(value + step);
