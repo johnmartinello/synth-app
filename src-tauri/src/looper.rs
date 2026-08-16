@@ -17,23 +17,11 @@ pub enum LooperEvent {
     Stop,
     Undo,
     Clear,
-    SelectTrack {
-        track: u8,
-    },
-    SetMute {
-        track: u8,
-        on: bool,
-    },
-    SetLevel {
-        track: u8,
-        norm: f32,
-    },
-    SetMult {
-        mult: u8,
-    },
-    SetCountIn {
-        on: bool,
-    },
+    SelectTrack { track: u8 },
+    SetMute { track: u8, on: bool },
+    SetLevel { track: u8, norm: f32 },
+    SetMult { mult: u8 },
+    SetCountIn { on: bool },
 }
 
 #[repr(u8)]
@@ -49,10 +37,7 @@ pub enum TrackMode {
 
 impl TrackMode {
     fn is_transporting(self) -> bool {
-        matches!(
-            self,
-            Self::Recording | Self::Playing | Self::Overdubbing
-        )
+        matches!(self, Self::Recording | Self::Playing | Self::Overdubbing)
     }
 
     fn is_writing(self) -> bool {
@@ -439,10 +424,7 @@ impl Looper {
             return QuantizeTo::Subdivision;
         }
         let t1_first = self.selected == 0
-            && matches!(
-                self.tracks[0].mode,
-                TrackMode::Empty | TrackMode::Recording
-            );
+            && matches!(self.tracks[0].mode, TrackMode::Empty | TrackMode::Recording);
         match action {
             PendingAction::Rec if t1_first && self.tracks[0].mode == TrackMode::Empty => {
                 QuantizeTo::Bar

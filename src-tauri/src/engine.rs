@@ -1317,9 +1317,23 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.iter().all(|n| !n.on));
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67]);
     }
@@ -1333,7 +1347,14 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 128, restart: true }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 128,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -1346,10 +1367,24 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 255, restart: true }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.iter().all(|n| !n.on));
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67]);
     }
@@ -1362,10 +1397,31 @@ mod tests {
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -1378,9 +1434,23 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 2, restart: true }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 2,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.iter().all(|n| !n.on));
-        eng.handle(EngineEvent::Strum { pos: 50, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 50,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60]);
     }
@@ -1394,9 +1464,23 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         assert!(out.iter().all(|n| !n.on));
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67]);
     }
@@ -1416,12 +1500,48 @@ mod tests {
         loud.handle(EngineEvent::ChordOff, 0, &mut out_l);
         out_q.clear();
         out_l.clear();
-        quiet.handle(EngineEvent::Strum { pos: 40, restart: true }, 0, &mut out_q);
-        quiet.handle(EngineEvent::Strum { pos: 45, restart: false }, 0, &mut out_q);
-        loud.handle(EngineEvent::Strum { pos: 20, restart: true }, 0, &mut out_l);
-        loud.handle(EngineEvent::Strum { pos: 80, restart: false }, 0, &mut out_l);
-        let vel_q = out_q.iter().find(|n| n.on && n.key == 60).map(|n| n.vel).unwrap();
-        let vel_l = out_l.iter().find(|n| n.on && n.key == 60).map(|n| n.vel).unwrap();
+        quiet.handle(
+            EngineEvent::Strum {
+                pos: 40,
+                restart: true,
+            },
+            0,
+            &mut out_q,
+        );
+        quiet.handle(
+            EngineEvent::Strum {
+                pos: 45,
+                restart: false,
+            },
+            0,
+            &mut out_q,
+        );
+        loud.handle(
+            EngineEvent::Strum {
+                pos: 20,
+                restart: true,
+            },
+            0,
+            &mut out_l,
+        );
+        loud.handle(
+            EngineEvent::Strum {
+                pos: 80,
+                restart: false,
+            },
+            0,
+            &mut out_l,
+        );
+        let vel_q = out_q
+            .iter()
+            .find(|n| n.on && n.key == 60)
+            .map(|n| n.vel)
+            .unwrap();
+        let vel_l = out_l
+            .iter()
+            .find(|n| n.on && n.key == 60)
+            .map(|n| n.vel)
+            .unwrap();
         assert!(vel_l > vel_q, "loud {vel_l} vs quiet {vel_q}");
     }
 
@@ -1435,8 +1555,22 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len: 5 }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67, 71, 74]);
     }
@@ -1449,10 +1583,31 @@ mod tests {
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67]);
     }
@@ -1467,8 +1622,22 @@ mod tests {
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         assert!(out.iter().all(|n| !n.on));
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60, 64, 67]);
     }
@@ -1480,8 +1649,22 @@ mod tests {
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
         let (seventh, seventh_len) = seventh();
         eng.handle(
@@ -1495,9 +1678,19 @@ mod tests {
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         assert!(!offs.contains(&60) && !offs.contains(&64) && !offs.contains(&67));
         out.clear();
-        eng.handle(EngineEvent::Strum { pos: 0, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
-        assert!(ons.contains(&60), "stroke must continue after ChordOn, got {ons:?}");
+        assert!(
+            ons.contains(&60),
+            "stroke must continue after ChordOn, got {ons:?}"
+        );
     }
 
     #[test]
@@ -1507,9 +1700,30 @@ mod tests {
         let mut union = [0u8; MAX_CHORD_NOTES];
         union[..5].copy_from_slice(&[60, 64, 67, 71, 74]);
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
-        eng.handle(EngineEvent::ChordOn { notes: union, len: 5 }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::ChordOn {
+                notes: union,
+                len: 5,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
         let (notes, len) = triad();
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
@@ -1527,8 +1741,22 @@ mod tests {
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
         eng.handle(EngineEvent::StrumOff, 0, &mut out);
         assert!(out.is_empty());
@@ -1557,8 +1785,22 @@ mod tests {
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         assert!(
@@ -1583,8 +1825,22 @@ mod tests {
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
-        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 0,
+                restart: true,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::Strum {
+                pos: 255,
+                restart: false,
+            },
+            0,
+            &mut out,
+        );
         out.clear();
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         assert!(out.iter().all(|n| n.on), "sustain must keep strummed notes");

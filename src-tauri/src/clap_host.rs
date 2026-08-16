@@ -4,6 +4,7 @@ mod gui;
 mod timer;
 
 use crate::audio::activate_to_stream;
+pub use crate::audio::FilterMode;
 use crate::discovery::{self, DiscoveryReport};
 use crate::engine::{
     midi_octave, midi_to_degree, sanitize_roll_ms, ArpMode, ChordType, EngineEvent, EngineSettings,
@@ -269,6 +270,12 @@ pub enum HostCommand {
     SetFilter {
         value: f32,
     },
+    SetFilterType {
+        mode: FilterMode,
+    },
+    SetFilterRes {
+        value: f32,
+    },
     SetRoll {
         ms: f32,
     },
@@ -339,6 +346,10 @@ pub struct HostStatus {
     pub arp_rate_hz: f32,
     pub midi_clock: bool,
     pub filter_cutoff: f32,
+    #[serde(default)]
+    pub filter_type: FilterMode,
+    #[serde(default)]
+    pub filter_res: f32,
     pub roll_ms: f32,
     pub midi_learn: Option<String>,
     pub midi_maps: HashMap<String, String>,
@@ -520,7 +531,14 @@ fn emit_env_ui(app: &AppHandle, last: &mut u32) {
         return;
     }
     *last = packed;
-    let _ = app.emit("env-ui", EnvUi { stage, progress, level });
+    let _ = app.emit(
+        "env-ui",
+        EnvUi {
+            stage,
+            progress,
+            level,
+        },
+    );
 }
 
 fn emit_looper_ui(app: &AppHandle, last: &mut u64, status: &mut HostStatus) {
@@ -567,9 +585,7 @@ fn copy_metro(status: &mut HostStatus, metro: &MetronomeSettings) {
 fn push_metro(prod: &mut Producer<EngineEvent>, metro: &MetronomeSettings) {
     push_engine(
         prod,
-        EngineEvent::Metronome(MetronomeEvent::SetEnabled {
-            on: metro.enabled,
-        }),
+        EngineEvent::Metronome(MetronomeEvent::SetEnabled { on: metro.enabled }),
     );
     push_engine(
         prod,
@@ -592,9 +608,7 @@ fn push_metro(prod: &mut Producer<EngineEvent>, metro: &MetronomeSettings) {
     );
     push_engine(
         prod,
-        EngineEvent::Metronome(MetronomeEvent::SetVolume {
-            norm: metro.volume,
-        }),
+        EngineEvent::Metronome(MetronomeEvent::SetVolume { norm: metro.volume }),
     );
 }
 
@@ -602,7 +616,12 @@ fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
     let Some(app) = app else {
         return;
     };
-    let _ = app.emit("pads-ui", PadsUi { held: held.to_vec() });
+    let _ = app.emit(
+        "pads-ui",
+        PadsUi {
+            held: held.to_vec(),
+        },
+    );
 }
 
 /// MiniLab 3 Pad 1 (Arp). Toggle/gate CC: ≥64 on, <64 off.
@@ -756,6 +775,23 @@ fn apply_filter(status: &mut HostStatus, value: f32, app: Option<&AppHandle>) {
     }
 }
 
+fn apply_filter_type(status: &mut HostStatus, mode: FilterMode, app: Option<&AppHandle>) {
+    crate::audio::set_filter_mode(mode);
+    status.filter_type = mode;
+    if let Some(app) = app {
+        emit_status(app, status);
+    }
+}
+
+fn apply_filter_res(status: &mut HostStatus, value: f32, app: Option<&AppHandle>) {
+    let v = value.clamp(0.0, 1.0);
+    crate::audio::set_filter_res(v);
+    status.filter_res = v;
+    if let Some(app) = app {
+        emit_status(app, status);
+    }
+}
+
 fn push_roll(prod: &mut Producer<EngineEvent>, settings: &EngineSettings) {
     push_engine(
         prod,
@@ -764,7 +800,6 @@ fn push_roll(prod: &mut Producer<EngineEvent>, settings: &EngineSettings) {
         },
     );
 }
-
 
 /// Map a 0–127 MIDI control (mod touchbar / CC1) onto the strum plate.
 fn handle_mod_touchbar(
@@ -782,7 +817,13 @@ fn handle_mod_touchbar(
         return;
     }
     let pos = ((u16::from(val) * 255) / 127) as u8;
-    push_engine(prod, EngineEvent::Strum { pos, restart: false });
+    push_engine(
+        prod,
+        EngineEvent::Strum {
+            pos,
+            restart: false,
+        },
+    );
     emit_strum_ui(app, val as f32 / 127.0, true);
 }
 
@@ -820,11 +861,7 @@ fn sync_sustain(
     }
 }
 
-fn send_held_chords(
-    prod: &mut Producer<EngineEvent>,
-    settings: &EngineSettings,
-    held: &[u8],
-) {
+fn send_held_chords(prod: &mut Producer<EngineEvent>, settings: &EngineSettings, held: &[u8]) {
     if held.is_empty() {
         push_engine(prod, EngineEvent::ChordOff);
         return;
@@ -868,6 +905,8 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         arp_rate_hz: 8.0,
         midi_clock: false,
         filter_cutoff: 1.0,
+        filter_type: FilterMode::Lp,
+        filter_res: 0.0,
         roll_ms: 0.0,
         midi_learn: None,
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
@@ -988,10 +1027,7 @@ fn run_with_plugin(
             );
         }
         if midi_clock.poll_timeout() {
-            push_engine(
-                &mut engine_prod,
-                EngineEvent::MidiClockSync { on: false },
-            );
+            push_engine(&mut engine_prod, EngineEvent::MidiClockSync { on: false });
             if metro.enabled {
                 metro.midi_sync = false;
                 metro.live_bpm = metro.user_bpm;
@@ -1326,15 +1362,7 @@ fn handle_learned_source(
         return false;
     };
     apply_learned_param(
-        param,
-        val,
-        settings,
-        envelope,
-        prod,
-        midi_clock,
-        looper,
-        status,
-        app,
+        param, val, settings, envelope, prod, midi_clock, looper, status, app,
     );
     true
 }
@@ -1397,6 +1425,9 @@ fn apply_learned_param(
         }
         LearnableParam::Filter => {
             apply_filter(status, value, None);
+        }
+        LearnableParam::FilterRes => {
+            apply_filter_res(status, value, None);
         }
         LearnableParam::Roll => {
             let ms = sanitize_roll_ms(value);
@@ -1470,10 +1501,7 @@ fn handle_midi_realtime(
                 if let Some(bpm) = result.bpm {
                     metro.midi_sync = true;
                     metro.live_bpm = bpm;
-                    push_engine(
-                        prod,
-                        EngineEvent::Metronome(MetronomeEvent::SetBpm { bpm }),
-                    );
+                    push_engine(prod, EngineEvent::Metronome(MetronomeEvent::SetBpm { bpm }));
                     copy_metro(host_status, metro);
                     changed = true;
                 } else if result.became_live {
@@ -1491,7 +1519,12 @@ fn handle_midi_realtime(
         }
         0xFA | 0xFB => {
             // Keep pulse alignment if the controller sends transport with its arp.
-            push_engine(prod, EngineEvent::MidiClockSync { on: midi_clock.live });
+            push_engine(
+                prod,
+                EngineEvent::MidiClockSync {
+                    on: midi_clock.live,
+                },
+            );
         }
         0xFC => {}
         _ => {}
@@ -1676,6 +1709,12 @@ fn handle_command(
         HostCommand::SetFilter { value } => {
             apply_filter(status, value, Some(app));
         }
+        HostCommand::SetFilterType { mode } => {
+            apply_filter_type(status, mode, Some(app));
+        }
+        HostCommand::SetFilterRes { value } => {
+            apply_filter_res(status, value, Some(app));
+        }
         HostCommand::SetRoll { ms } => {
             let ms = sanitize_roll_ms(ms);
             if (settings.roll_ms - ms).abs() < 0.5 {
@@ -1849,7 +1888,12 @@ fn handle_command(
         }
         HostCommand::LooperSelect { track } => {
             looper.selected = track.min(1);
-            push_looper(prod, LooperEvent::SelectTrack { track: looper.selected });
+            push_looper(
+                prod,
+                LooperEvent::SelectTrack {
+                    track: looper.selected,
+                },
+            );
             copy_looper_controls(status, looper);
             emit_status(app, status);
         }

@@ -17,19 +17,63 @@ use cpal::{
     BuildStreamError, Device, FromSample, OutputCallbackInfo, SampleFormat, Stream, StreamConfig,
 };
 use rtrb::Consumer;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_1_SQRT_2, PI};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// 1.0 = open (IEEE bits of 1.0f32).
 static FILTER_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000);
+static FILTER_RES_BITS: AtomicU32 = AtomicU32::new(0);
+static FILTER_MODE_BITS: AtomicU32 = AtomicU32::new(0);
+
+const FILTER_Q_MIN: f32 = FRAC_1_SQRT_2;
+const FILTER_Q_MAX: f32 = 10.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u32)]
+pub enum FilterMode {
+    #[default]
+    Lp = 0,
+    Hp = 1,
+    Bp = 2,
+    Notch = 3,
+}
+
+impl FilterMode {
+    fn from_bits(v: u32) -> Self {
+        match v {
+            1 => Self::Hp,
+            2 => Self::Bp,
+            3 => Self::Notch,
+            _ => Self::Lp,
+        }
+    }
+}
 
 pub fn set_filter_norm(value: f32) {
     FILTER_BITS.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
 
+pub fn set_filter_res(value: f32) {
+    FILTER_RES_BITS.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+pub fn set_filter_mode(mode: FilterMode) {
+    FILTER_MODE_BITS.store(mode as u32, Ordering::Relaxed);
+}
+
 fn filter_norm() -> f32 {
     f32::from_bits(FILTER_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+}
+
+fn filter_res() -> f32 {
+    f32::from_bits(FILTER_RES_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+}
+
+fn filter_mode() -> FilterMode {
+    FilterMode::from_bits(FILTER_MODE_BITS.load(Ordering::Relaxed))
 }
 
 fn apply_env_gain(frames: &mut [f32], channels: usize, start: f32, end: f32) {
@@ -47,49 +91,77 @@ fn apply_env_gain(frames: &mut [f32], channels: usize, start: f32, end: f32) {
     }
 }
 
-/// Two cascaded one-pole low-passes on the host output (12 dB/oct).
-struct Lowpass {
+/// Stereo TPT SVF on the host output (12 dB/oct). Cytomic / Zavalishin.
+struct Svf {
     sample_rate: f32,
-    z1: [f32; 2],
-    z2: [f32; 2],
-    coeff: f32,
-    coeff_target: f32,
+    mode: FilterMode,
+    lp_open: bool,
+    ic1: [f32; 2],
+    ic2: [f32; 2],
+    g: f32,
+    g_target: f32,
+    k: f32,
+    k_target: f32,
 }
 
-impl Lowpass {
+impl Svf {
     fn new(sample_rate: f64) -> Self {
+        let sr = sample_rate.max(1.0) as f32;
+        let g_open = (PI * 0.49).tan();
+        let k = 1.0 / FILTER_Q_MIN;
         Self {
-            sample_rate: sample_rate.max(1.0) as f32,
-            z1: [0.0; 2],
-            z2: [0.0; 2],
-            coeff: 1.0,
-            coeff_target: 1.0,
+            sample_rate: sr,
+            mode: FilterMode::Lp,
+            lp_open: true,
+            ic1: [0.0; 2],
+            ic2: [0.0; 2],
+            g: g_open,
+            g_target: g_open,
+            k,
+            k_target: k,
         }
     }
 
-    fn set_norm(&mut self, norm: f32) {
+    fn set_params(&mut self, norm: f32, res: f32, mode: FilterMode) {
+        self.mode = mode;
         let n = norm.clamp(0.0, 1.0);
-        self.coeff_target = if n >= 0.995 {
-            1.0
-        } else {
-            let hz = (70.0 * (18_000.0_f32 / 70.0).powf(n)).min(self.sample_rate * 0.49);
-            1.0 - (-2.0 * PI * hz / self.sample_rate).exp()
-        };
+        self.lp_open = mode == FilterMode::Lp && n >= 0.995;
+        let hz = (70.0 * (18_000.0_f32 / 70.0).powf(n)).min(self.sample_rate * 0.49);
+        self.g_target = (PI * hz / self.sample_rate).tan();
+        let q = FILTER_Q_MIN + res.clamp(0.0, 1.0) * (FILTER_Q_MAX - FILTER_Q_MIN);
+        self.k_target = 1.0 / q;
     }
 
     fn process_interleaved(&mut self, frames: &mut [f32], channels: usize) {
         let ch = channels.max(1).min(2);
         let step = channels.max(1);
         for frame in frames.chunks_exact_mut(step) {
-            self.coeff += 0.12 * (self.coeff_target - self.coeff);
-            let a = self.coeff;
+            self.g += 0.12 * (self.g_target - self.g);
+            self.k += 0.12 * (self.k_target - self.k);
+            if self.lp_open {
+                continue;
+            }
+            let g = self.g;
+            let k = self.k;
+            let a1 = 1.0 / (1.0 + g * (g + k));
+            let a2 = g * a1;
+            let a3 = g * a2;
             for c in 0..ch.min(frame.len()) {
                 let x = frame[c];
-                let y1 = self.z1[c] + a * (x - self.z1[c]);
-                self.z1[c] = y1;
-                let y2 = self.z2[c] + a * (y1 - self.z2[c]);
-                self.z2[c] = y2;
-                frame[c] = y2;
+                let v3 = x - self.ic2[c];
+                let v1 = a1 * self.ic1[c] + a2 * v3;
+                let v2 = self.ic2[c] + a2 * self.ic1[c] + a3 * v3;
+                self.ic1[c] = 2.0 * v1 - self.ic1[c];
+                self.ic2[c] = 2.0 * v2 - self.ic2[c];
+                let lp = v2;
+                let bp = v1;
+                let hp = x - k * bp - lp;
+                frame[c] = match self.mode {
+                    FilterMode::Lp => lp,
+                    FilterMode::Hp => hp,
+                    FilterMode::Bp => bp,
+                    FilterMode::Notch => lp + hp,
+                };
             }
         }
     }
@@ -188,7 +260,7 @@ struct StreamAudioProcessor {
     generated: Vec<GeneratedNote>,
     note_port: Option<(u16, bool)>,
     steady_counter: u64,
-    lowpass: Lowpass,
+    svf: Svf,
 }
 
 impl StreamAudioProcessor {
@@ -212,7 +284,7 @@ impl StreamAudioProcessor {
             generated: Vec::with_capacity(64),
             note_port,
             steady_counter: 0,
-            lowpass: Lowpass::new(sample_rate),
+            svf: Svf::new(sample_rate),
         }
     }
 
@@ -272,12 +344,13 @@ impl StreamAudioProcessor {
             None,
         ) {
             Ok(_) => {
-                self.lowpass.set_norm(filter_norm());
-                let lp = &mut self.lowpass;
+                self.svf
+                    .set_params(filter_norm(), filter_res(), filter_mode());
+                let svf = &mut self.svf;
                 let looper = &mut self.looper;
                 let metro = &mut self.metro;
                 self.buffers.write_to_cpal_buffer(data, |buf, ch| {
-                    lp.process_interleaved(buf, ch);
+                    svf.process_interleaved(buf, ch);
                     apply_env_gain(buf, ch, env_start, env_end);
                     metronome::process_looper_with_metro(metro, looper, buf, ch);
                 });
@@ -431,14 +504,43 @@ pub fn sounding_keys_from_mask(mask: [u64; 2]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::Lowpass;
+    use super::{FilterMode, Svf};
+    use std::f32::consts::PI;
+
+    const SR: f64 = 48_000.0;
+
+    fn cutoff_norm_for_hz(hz: f32) -> f32 {
+        ((hz / 70.0).ln() / (18_000.0_f32 / 70.0).ln()).clamp(0.0, 1.0)
+    }
+
+    fn sine_stereo(freq: f32, frames: usize) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames * 2];
+        for i in 0..frames {
+            let s = (2.0 * PI * freq * i as f32 / SR as f32).sin();
+            buf[i * 2] = s;
+            buf[i * 2 + 1] = s;
+        }
+        buf
+    }
+
+    fn energy_tail(buf: &[f32]) -> f32 {
+        let start = buf.len() / 2;
+        buf[start..].iter().map(|s| s * s).sum()
+    }
+
+    fn run(mode: FilterMode, norm: f32, res: f32, mut buf: Vec<f32>) -> Vec<f32> {
+        let mut svf = Svf::new(SR);
+        svf.set_params(norm, res, mode);
+        svf.process_interleaved(&mut buf, 2);
+        buf
+    }
 
     #[test]
     fn lowpass_darkens_high_frequency() {
-        let mut open = Lowpass::new(48_000.0);
-        let mut dark = Lowpass::new(48_000.0);
-        open.set_norm(1.0);
-        dark.set_norm(0.0);
+        let mut open = Svf::new(SR);
+        let mut dark = Svf::new(SR);
+        open.set_params(1.0, 0.0, FilterMode::Lp);
+        dark.set_params(0.0, 0.0, FilterMode::Lp);
         let mut hi_open = vec![0.0f32; 256];
         let mut hi_dark = vec![0.0f32; 256];
         for i in 0..128 {
@@ -452,5 +554,44 @@ mod tests {
         dark.process_interleaved(&mut hi_dark, 2);
         let energy = |buf: &[f32]| buf[128..].iter().map(|s| s * s).sum::<f32>();
         assert!(energy(&hi_dark) < energy(&hi_open) * 0.25);
+    }
+
+    #[test]
+    fn lp_at_one_stays_dry() {
+        let src = sine_stereo(440.0, 512);
+        let out = run(FilterMode::Lp, 1.0, 0.0, src.clone());
+        let err: f32 = src.iter().zip(&out).map(|(a, b)| (a - b).abs()).sum();
+        assert!(err < 1e-4, "lp open should be dry, err={err}");
+    }
+
+    #[test]
+    fn highpass_thins_low_frequency() {
+        let src = sine_stereo(120.0, 4096);
+        let open = run(FilterMode::Hp, 0.0, 0.0, src.clone());
+        let thin = run(FilterMode::Hp, 1.0, 0.0, src);
+        assert!(energy_tail(&thin) < energy_tail(&open) * 0.25);
+    }
+
+    #[test]
+    fn bandpass_rejects_dc_and_prefers_mid() {
+        let dc = run(FilterMode::Bp, 0.5, 0.0, vec![1.0f32; 4096 * 2]);
+        assert!(energy_tail(&dc) < 0.05);
+
+        let mid_n = cutoff_norm_for_hz(1_000.0);
+        let mid = run(FilterMode::Bp, mid_n, 0.35, sine_stereo(1_000.0, 4096));
+        let low = run(FilterMode::Bp, mid_n, 0.35, sine_stereo(80.0, 4096));
+        let high = run(FilterMode::Bp, mid_n, 0.35, sine_stereo(12_000.0, 4096));
+        let mid_e = energy_tail(&mid);
+        assert!(mid_e > energy_tail(&low) * 4.0);
+        assert!(mid_e > energy_tail(&high) * 4.0);
+    }
+
+    #[test]
+    fn notch_cuts_mid() {
+        let mid_n = cutoff_norm_for_hz(1_000.0);
+        let src = sine_stereo(1_000.0, 4096);
+        let dry = run(FilterMode::Lp, 1.0, 0.0, src.clone());
+        let notched = run(FilterMode::Notch, mid_n, 0.5, src);
+        assert!(energy_tail(&notched) < energy_tail(&dry) * 0.5);
     }
 }

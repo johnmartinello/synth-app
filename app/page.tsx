@@ -6,6 +6,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
 import { HwButton, HwDragValue, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
+type FilterType = "lp" | "hp" | "bp" | "notch";
+
+function parseFilterType(v: string | undefined): FilterType {
+  if (v === "hp" || v === "bp" || v === "notch") return v;
+  return "lp";
+}
+
 type DiscoveryReport = {
   searched_paths: string[];
   clap_files: string[];
@@ -33,6 +40,8 @@ type HostStatus = {
   arp_rate_hz?: number;
   midi_clock?: boolean;
   filter_cutoff?: number;
+  filter_type?: FilterType;
+  filter_res?: number;
   roll_ms?: number;
   midi_learn?: string | null;
   midi_maps?: Record<string, string>;
@@ -201,6 +210,8 @@ export default function Home() {
   const [arpRate, setArpRate] = useState(8);
   const [arpLatch, setArpLatch] = useState(false);
   const [filter, setFilter] = useState(1);
+  const [filterType, setFilterType] = useState<FilterType>("lp");
+  const [filterRes, setFilterRes] = useState(0);
   const [rollMs, setRollMs] = useState(0);
   const [strumMode, setStrumMode] = useState(false);
   const [env, setEnv] = useState<EnvParams>(DEFAULT_ENV);
@@ -211,6 +222,7 @@ export default function Home() {
   const autoMidiRef = useRef(false);
   const rateGesture = useRef(false);
   const filterGesture = useRef(false);
+  const filterResGesture = useRef(false);
   const rollGesture = useRef(false);
   const envGesture = useRef(false);
   const levelGesture = useRef<number | null>(null);
@@ -263,6 +275,8 @@ export default function Home() {
         if (typeof next.arp_enabled === "boolean") setArpOn(next.arp_enabled);
         if (typeof next.arp_rate_hz === "number") setArpRate(next.arp_rate_hz);
         if (typeof next.filter_cutoff === "number") setFilter(next.filter_cutoff);
+        if (next.filter_type) setFilterType(parseFilterType(next.filter_type));
+        if (typeof next.filter_res === "number") setFilterRes(next.filter_res);
         if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
         if (next.envelope) setEnv(next.envelope);
         if (next.looper) setLooper(next.looper);
@@ -281,6 +295,10 @@ export default function Home() {
           }
           if (typeof next.filter_cutoff === "number" && !filterGesture.current) {
             setFilter(next.filter_cutoff);
+          }
+          if (next.filter_type) setFilterType(parseFilterType(next.filter_type));
+          if (typeof next.filter_res === "number" && !filterResGesture.current) {
+            setFilterRes(next.filter_res);
           }
           if (typeof next.roll_ms === "number" && !rollGesture.current) {
             setRollMs(next.roll_ms);
@@ -775,6 +793,22 @@ export default function Home() {
             ]}
             onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
           />
+          <HwMenu
+            className="hw-menu-compact"
+            label="Type"
+            value={filterType}
+            options={[
+              ["lp", "Lowpass"],
+              ["hp", "Highpass"],
+              ["bp", "Bandpass"],
+              ["notch", "Notch"],
+            ]}
+            onChange={(v) => {
+              const mode = v as FilterType;
+              setFilterType(mode);
+              invoke("set_filter_type", { mode }).catch(() => undefined);
+            }}
+          />
         </div>
         <div className="hw-knobs">
           <HwKnob
@@ -805,6 +839,22 @@ export default function Home() {
               filterGesture.current = on;
             }}
             midi={midiFor("filter")}
+          />
+          <HwKnob
+            label="Res"
+            display={`${Math.round(filterRes * 100)}`}
+            value={filterRes}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => {
+              setFilterRes(v);
+              invoke("set_filter_res", { value: v }).catch(() => undefined);
+            }}
+            onGestureChange={(on) => {
+              filterResGesture.current = on;
+            }}
+            midi={midiFor("filter_res")}
           />
           <HwKnob
             label="Roll"
@@ -1394,8 +1444,9 @@ function ConfigModal({
             open. In strum mode, the mod touchbar (CC1) sweeps the
             strings. Arp button (CC102) toggles arp. Rate follows MIDI clock
             when present. Click MIDI next to a knob, then move a controller
-            knob to assign it (right-click to clear). Filter is a low-pass on
-            the output. Roll staggers block chords.
+            knob to assign it (right-click to clear). Filter is a 12 dB/oct
+            SVF on the output (LP / HP / BP / notch); Res emphasizes the
+            cutoff. Roll staggers block chords.
           </p>
         </div>
         <div>

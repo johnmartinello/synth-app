@@ -610,7 +610,10 @@ mod tests {
         env.gate_off();
         env.advance(100);
         let before = env.level();
-        assert!(before > 0.4 && before < 0.6, "mid-release level was {before}");
+        assert!(
+            before > 0.4 && before < 0.6,
+            "mid-release level was {before}"
+        );
         env.gate_on();
         assert_eq!(env.stage(), EnvStage::Attack);
         assert!((env.level() - before).abs() < 1e-5);

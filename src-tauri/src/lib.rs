@@ -62,6 +62,8 @@ fn get_status() -> HostStatus {
         arp_rate_hz: 8.0,
         midi_clock: false,
         filter_cutoff: 1.0,
+        filter_type: audio::FilterMode::Lp,
+        filter_res: 0.0,
         roll_ms: 0.0,
         midi_learn: None,
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
@@ -175,6 +177,16 @@ fn set_arp(
 #[tauri::command]
 fn set_filter(state: tauri::State<AppState>, value: f32) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetFilter { value })
+}
+
+#[tauri::command]
+fn set_filter_type(state: tauri::State<AppState>, mode: audio::FilterMode) -> Result<(), String> {
+    send_cmd(&state, HostCommand::SetFilterType { mode })
+}
+
+#[tauri::command]
+fn set_filter_res(state: tauri::State<AppState>, value: f32) -> Result<(), String> {
+    send_cmd(&state, HostCommand::SetFilterRes { value })
 }
 
 #[tauri::command]
@@ -393,6 +405,8 @@ pub fn run() {
             set_octave,
             set_arp,
             set_filter,
+            set_filter_type,
+            set_filter_res,
             set_roll,
             set_envelope,
             start_midi_learn,

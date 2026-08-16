@@ -16,22 +16,11 @@ const SUB_AMP: f32 = 0.12;
 /// Copy-sized command from the host thread onto the audio thread.
 #[derive(Debug, Clone, Copy)]
 pub enum MetronomeEvent {
-    SetEnabled {
-        on: bool,
-    },
-    SetBpm {
-        bpm: f32,
-    },
-    SetMeter {
-        numerator: u8,
-        denominator: u8,
-    },
-    SetSubdivision {
-        sub: u8,
-    },
-    SetVolume {
-        norm: f32,
-    },
+    SetEnabled { on: bool },
+    SetBpm { bpm: f32 },
+    SetMeter { numerator: u8, denominator: u8 },
+    SetSubdivision { sub: u8 },
+    SetVolume { norm: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,7 +396,10 @@ mod tests {
     #[test]
     fn bar_frames_3_4_120_at_48k() {
         assert_eq!(bar_frames(48_000.0, 120.0, 3, 4), 72_000);
-        assert_ne!(bar_frames(48_000.0, 120.0, 3, 4), bar_frames(48_000.0, 120.0, 4, 4));
+        assert_ne!(
+            bar_frames(48_000.0, 120.0, 3, 4),
+            bar_frames(48_000.0, 120.0, 4, 4)
+        );
     }
 
     #[test]
@@ -454,7 +446,9 @@ mod tests {
         assert!(n >= 1);
         assert_eq!(ev[0], (0, GridKind::Bar));
         assert!(
-            ev.iter().take(n).any(|&(f, k)| f > 0 && k == GridKind::Subdivision),
+            ev.iter()
+                .take(n)
+                .any(|&(f, k)| f > 0 && k == GridKind::Subdivision),
             "expected a 16th after the downbeat"
         );
     }

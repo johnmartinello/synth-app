@@ -25,6 +25,7 @@ pub const LEARN_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum LearnableParam {
     ArpRate,
     Filter,
+    FilterRes,
     Roll,
     EnvDelay,
     EnvAttack,
@@ -46,6 +47,7 @@ impl LearnableParam {
         match self {
             Self::ArpRate => "arp_rate",
             Self::Filter => "filter",
+            Self::FilterRes => "filter_res",
             Self::Roll => "roll",
             Self::EnvDelay => "env_delay",
             Self::EnvAttack => "env_attack",
@@ -67,6 +69,7 @@ impl LearnableParam {
         match id {
             "arp_rate" => Some(Self::ArpRate),
             "filter" => Some(Self::Filter),
+            "filter_res" => Some(Self::FilterRes),
             "roll" => Some(Self::Roll),
             "env_delay" => Some(Self::EnvDelay),
             "env_attack" => Some(Self::EnvAttack),
@@ -113,12 +116,20 @@ impl LearnableParam {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MidiSource {
-    Cc { n: u8 },
-    Note { n: u8 },
+    Cc {
+        n: u8,
+    },
+    Note {
+        n: u8,
+    },
     /// MIDI realtime: `0xFA` start, `0xFB` continue, `0xFC` stop.
-    Realtime { status: u8 },
+    Realtime {
+        status: u8,
+    },
     /// MIDI Machine Control command byte (`01` stop, `02` play, `06` rec).
-    Mmc { command: u8 },
+    Mmc {
+        command: u8,
+    },
 }
 
 impl MidiSource {
@@ -196,6 +207,7 @@ pub fn cc_to_value(param: LearnableParam, val: u8) -> f32 {
     match param {
         LearnableParam::ArpRate => 1.0 + n * 15.0,
         LearnableParam::Filter
+        | LearnableParam::FilterRes
         | LearnableParam::EnvSustain
         | LearnableParam::LooperLevel1
         | LearnableParam::LooperLevel2 => n,
@@ -350,10 +362,7 @@ impl MidiLearnState {
     }
 
     pub fn poll_timeout(&mut self) -> bool {
-        if self
-            .armed_at
-            .is_some_and(|at| at.elapsed() > LEARN_TIMEOUT)
-        {
+        if self.armed_at.is_some_and(|at| at.elapsed() > LEARN_TIMEOUT) {
             self.cancel();
             true
         } else {
@@ -481,6 +490,8 @@ mod tests {
         assert!((cc_to_value(LearnableParam::ArpRate, 127) - 16.0).abs() < 1e-5);
         assert!((cc_to_value(LearnableParam::Filter, 0)).abs() < 1e-5);
         assert!((cc_to_value(LearnableParam::Filter, 127) - 1.0).abs() < 1e-5);
+        assert!((cc_to_value(LearnableParam::FilterRes, 0)).abs() < 1e-5);
+        assert!((cc_to_value(LearnableParam::FilterRes, 127) - 1.0).abs() < 1e-5);
         assert_eq!(cc_to_value(LearnableParam::Roll, 0), 0.0);
         assert_eq!(cc_to_value(LearnableParam::Roll, 127), 500.0);
         assert_eq!(
@@ -593,6 +604,7 @@ mod tests {
         for param in [
             LearnableParam::ArpRate,
             LearnableParam::Filter,
+            LearnableParam::FilterRes,
             LearnableParam::Roll,
             LearnableParam::EnvDelay,
             LearnableParam::EnvAttack,
@@ -610,7 +622,10 @@ mod tests {
         ] {
             assert_eq!(LearnableParam::from_id(param.as_id()), Some(param));
         }
-        assert_eq!(LearnableParam::from_id("looper_rec_play"), Some(LearnableParam::LooperRec));
+        assert_eq!(
+            LearnableParam::from_id("looper_rec_play"),
+            Some(LearnableParam::LooperRec)
+        );
         assert_eq!(LearnableParam::from_id("nope"), None);
     }
 }
