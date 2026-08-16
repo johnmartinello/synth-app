@@ -1,6 +1,7 @@
 //! Chord / voicing / arp / strum. Emits MIDI note numbers only; the host turns them into CLAP events.
 
 use crate::looper::LooperEvent;
+use crate::metronome::MetronomeEvent;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_CHORD_NOTES: usize = 16;
@@ -120,6 +121,7 @@ pub enum EngineEvent {
         release: f32,
     },
     Looper(LooperEvent),
+    Metronome(MetronomeEvent),
 }
 
 /// Whole-millisecond roll range (UI step is 1 ms).
@@ -640,6 +642,7 @@ impl AudioEngine {
                 });
             }
             EngineEvent::Looper(_) => {}
+            EngineEvent::Metronome(_) => {}
         }
     }
 

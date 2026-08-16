@@ -8,6 +8,7 @@ pub use config::FullAudioConfig;
 use crate::clap_host::CpalHost;
 use crate::engine::{AudioEngine, EngineEvent, GeneratedNote};
 use crate::looper::{Looper, LooperStatus};
+use crate::metronome::{self, Metronome, MetronomeEvent};
 use crate::midi;
 use buffers::HostAudioBuffers;
 use clack_host::prelude::*;
@@ -181,6 +182,8 @@ struct StreamAudioProcessor {
     engine_consumer: Consumer<EngineEvent>,
     engine: AudioEngine,
     looper: Looper,
+    metro: Metronome,
+    midi_clock_on: bool,
     events: EventBuffer,
     generated: Vec<GeneratedNote>,
     note_port: Option<(u16, bool)>,
@@ -203,6 +206,8 @@ impl StreamAudioProcessor {
             engine_consumer,
             engine: AudioEngine::new(sample_rate),
             looper: Looper::new(sample_rate, channels),
+            metro: Metronome::new(sample_rate),
+            midi_clock_on: false,
             events: EventBuffer::with_capacity(256),
             generated: Vec::with_capacity(64),
             note_port,
@@ -219,12 +224,18 @@ impl StreamAudioProcessor {
         while let Ok(ev) = self.engine_consumer.pop() {
             match ev {
                 EngineEvent::Looper(cmd) => self.looper.handle(cmd),
+                EngineEvent::Metronome(cmd) => self.apply_metro(cmd),
                 EngineEvent::MidiClockSync { on } => {
-                    self.looper.set_clock_sync(on);
+                    self.midi_clock_on = on;
+                    if !self.metro.enabled() {
+                        self.looper.set_clock_sync(on);
+                    }
                     self.engine.handle(ev, 0, &mut self.generated);
                 }
                 EngineEvent::MidiClockTick => {
-                    self.looper.clock_tick();
+                    if !self.metro.enabled() {
+                        self.looper.clock_tick();
+                    }
                     self.engine.handle(ev, 0, &mut self.generated);
                 }
                 other => self.engine.handle(other, 0, &mut self.generated),
@@ -263,10 +274,11 @@ impl StreamAudioProcessor {
                 self.lowpass.set_norm(filter_norm());
                 let lp = &mut self.lowpass;
                 let looper = &mut self.looper;
+                let metro = &mut self.metro;
                 self.buffers.write_to_cpal_buffer(data, |buf, ch| {
                     lp.process_interleaved(buf, ch);
                     apply_env_gain(buf, ch, env_start, env_end);
-                    looper.process_interleaved(buf, ch);
+                    metronome::process_looper_with_metro(metro, looper, buf, ch);
                 });
             }
             Err(e) => log::error!("Plugin process error: {e}"),
@@ -275,6 +287,17 @@ impl StreamAudioProcessor {
         publish_sounding(&self.engine);
         publish_env(&self.engine);
         publish_looper(&self.looper);
+    }
+
+    fn apply_metro(&mut self, ev: MetronomeEvent) {
+        self.metro.handle(ev);
+        if self.metro.enabled() {
+            self.looper.set_clock_sync(true);
+            self.looper.set_bar_frames(self.metro.bar_frames());
+        } else {
+            self.looper.set_clock_sync(self.midi_clock_on);
+            self.looper.set_bar_frames(0);
+        }
     }
 }
 

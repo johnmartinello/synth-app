@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
-import { HwButton, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
+import { HwButton, HwDragValue, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
 type DiscoveryReport = {
   searched_paths: string[];
@@ -38,6 +38,7 @@ type HostStatus = {
   midi_maps?: Record<string, number>;
   envelope?: EnvParams;
   looper?: LooperStatus;
+  metronome?: MetronomeStatus;
 };
 
 type LooperStatus = {
@@ -52,6 +53,42 @@ type LooperStatus = {
   clock_sync: boolean;
   pending: boolean;
 };
+
+type MetronomeStatus = {
+  enabled: boolean;
+  bpm: number;
+  numerator: number;
+  denominator: number;
+  subdivision: number;
+  volume: number;
+  midi_sync: boolean;
+};
+
+const DEFAULT_METRO: MetronomeStatus = {
+  enabled: false,
+  bpm: 120,
+  numerator: 4,
+  denominator: 4,
+  subdivision: 4,
+  volume: 0.5,
+  midi_sync: false,
+};
+
+const METERS: ReadonlyArray<readonly [string, string]> = [
+  ["2/4", "2/4"],
+  ["3/4", "3/4"],
+  ["4/4", "4/4"],
+  ["5/4", "5/4"],
+  ["6/8", "6/8"],
+  ["7/8", "7/8"],
+];
+
+const GRIDS: ReadonlyArray<readonly [string, string]> = [
+  ["1", "1/4"],
+  ["2", "1/8"],
+  ["3", "1/8T"],
+  ["4", "1/16"],
+];
 
 const DEFAULT_LOOPER: LooperStatus = {
   selected: 0,
@@ -164,6 +201,7 @@ export default function Home() {
   const [strumMode, setStrumMode] = useState(false);
   const [env, setEnv] = useState<EnvParams>(DEFAULT_ENV);
   const [looper, setLooper] = useState<LooperStatus>(DEFAULT_LOOPER);
+  const [metro, setMetro] = useState<MetronomeStatus>(DEFAULT_METRO);
   const [engineNotes, setEngineNotes] = useState<number[] | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const autoMidiRef = useRef(false);
@@ -172,6 +210,8 @@ export default function Home() {
   const rollGesture = useRef(false);
   const envGesture = useRef(false);
   const levelGesture = useRef<number | null>(null);
+  const metroBpmGesture = useRef(false);
+  const metroVolGesture = useRef(false);
 
   const previewNotes = useMemo(() => {
     if (held.size > 0) {
@@ -222,6 +262,7 @@ export default function Home() {
         if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
         if (next.envelope) setEnv(next.envelope);
         if (next.looper) setLooper(next.looper);
+        if (next.metronome) setMetro(next.metronome);
       } catch {
         /* web preview without Tauri */
       }
@@ -245,6 +286,13 @@ export default function Home() {
           }
           if (next.looper && levelGesture.current == null) {
             setLooper(next.looper);
+          }
+          if (next.metronome) {
+            setMetro((prev) => ({
+              ...next.metronome!,
+              bpm: metroBpmGesture.current ? prev.bpm : next.metronome!.bpm,
+              volume: metroVolGesture.current ? prev.volume : next.metronome!.volume,
+            }));
           }
         });
       } catch {
@@ -321,6 +369,18 @@ export default function Home() {
   useEffect(() => {
     invoke("set_chord_shape", { chordType, inversion, secondary }).catch(() => undefined);
   }, [chordType, inversion, secondary]);
+
+  const pushMetro = (next: MetronomeStatus) => {
+    setMetro(next);
+    invoke("set_metronome", {
+      enabled: next.enabled,
+      bpm: next.bpm,
+      numerator: next.numerator,
+      denominator: next.denominator,
+      subdivision: next.subdivision,
+      volume: next.volume,
+    }).catch(() => undefined);
+  };
 
   const bumpOctave = (next: number) => {
     setOctave(next);
@@ -510,68 +570,126 @@ export default function Home() {
 
       <hr className="hw-rule my-3" />
 
-      <section className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-        <HwToggleGroup
-          label="Key"
-          value={String(root)}
-          options={ROOTS.map((n, i) => [String(i), n] as const)}
-          onChange={(v) => setRoot(Number(v))}
-        />
-        <HwToggleGroup
-          label="Scale"
-          value={scale}
-          options={[
-            ["major", "Maj"],
-            ["minor", "Min"],
-          ]}
-          onChange={(v) => setScale(v as "major" | "minor")}
-        />
-      </section>
-
-      <section className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div className="hw-row">
-          <Silk>Oct</Silk>
-          <div className="hw-cluster">
-            <HwButton
-              disabled={octave <= 1}
-              onClick={() => bumpOctave(Math.max(1, octave - 1))}
-            >
-              −
-            </HwButton>
-            <HwButton className="min-w-8">{octave}</HwButton>
-            <HwButton
-              disabled={octave >= 7}
-              onClick={() => bumpOctave(Math.min(7, octave + 1))}
-            >
-              +
-            </HwButton>
+      <section className="mb-3 flex flex-wrap items-start gap-x-8 gap-y-3">
+        <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <HwToggleGroup
+              label="Key"
+              value={String(root)}
+              options={ROOTS.map((n, i) => [String(i), n] as const)}
+              onChange={(v) => setRoot(Number(v))}
+            />
+            <HwToggleGroup
+              label="Scale"
+              value={scale}
+              options={[
+                ["major", "Maj"],
+                ["minor", "Min"],
+              ]}
+              onChange={(v) => setScale(v as "major" | "minor")}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <div className="hw-row">
+              <Silk>Oct</Silk>
+              <div className="hw-cluster">
+                <HwButton
+                  disabled={octave <= 1}
+                  onClick={() => bumpOctave(Math.max(1, octave - 1))}
+                >
+                  −
+                </HwButton>
+                <HwButton className="min-w-8">{octave}</HwButton>
+                <HwButton
+                  disabled={octave >= 7}
+                  onClick={() => bumpOctave(Math.min(7, octave + 1))}
+                >
+                  +
+                </HwButton>
+              </div>
+            </div>
+            <HwToggleGroup
+              label="Type"
+              value={chordType}
+              options={CHORD_TYPES}
+              onChange={(v) => {
+                const next = v as ChordType;
+                setChordType(next);
+                setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
+              }}
+            />
+            <HwToggleGroup
+              label="Inv"
+              value={String(inversion)}
+              options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
+              disabledIds={
+                chordType === "1" ? ["1", "2", "3"] : chordType === "tri" ? ["3"] : []
+              }
+              onChange={(v) => setInversion(Number(v))}
+            />
+            <HwToggleGroup
+              label="Sec"
+              value={secondary}
+              options={SECONDARIES}
+              onChange={(v) => setSecondary(v as Secondary)}
+            />
           </div>
         </div>
-        <HwToggleGroup
-          label="Type"
-          value={chordType}
-          options={CHORD_TYPES}
-          onChange={(v) => {
-            const next = v as ChordType;
-            setChordType(next);
-            setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
-          }}
-        />
-        <HwToggleGroup
-          label="Inv"
-          value={String(inversion)}
-          options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
-          disabledIds={
-            chordType === "1" ? ["1", "2", "3"] : chordType === "tri" ? ["3"] : []
-          }
-          onChange={(v) => setInversion(Number(v))}
-        />
-        <HwToggleGroup
-          label="Sec"
-          value={secondary}
-          options={SECONDARIES}
-          onChange={(v) => setSecondary(v as Secondary)}
-        />
+        <div className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2">
+          <Silk>Metronome{metro.midi_sync ? " · sync" : ""}</Silk>
+          <HwToggle
+            on={metro.enabled}
+            onClick={() => pushMetro({ ...metro, enabled: !metro.enabled })}
+          >
+            On
+          </HwToggle>
+            <HwMenu
+              className="hw-menu-compact"
+              label="Meter"
+            value={`${metro.numerator}/${metro.denominator}`}
+            options={METERS}
+            onChange={(v) => {
+              const [n, d] = v.split("/").map(Number);
+              pushMetro({
+                ...metro,
+                numerator: n || 4,
+                denominator: d || 4,
+              });
+            }}
+          />
+            <HwMenu
+              className="hw-menu-compact"
+              label="Grid"
+            value={String(metro.subdivision)}
+            options={GRIDS}
+            onChange={(v) => pushMetro({ ...metro, subdivision: Number(v) })}
+          />
+          <HwDragValue
+            label="BPM"
+            display={`${Math.round(metro.bpm)}${metro.midi_sync ? " sync" : ""}`}
+            value={metro.bpm}
+            min={40}
+            max={240}
+            step={1}
+            disabled={metro.midi_sync}
+            onChange={(v) => pushMetro({ ...metro, bpm: v })}
+            onGestureChange={(on) => {
+              metroBpmGesture.current = on;
+            }}
+          />
+          <HwDragValue
+            label="Level"
+            display={`${Math.round(metro.volume * 100)}`}
+            value={Math.round(metro.volume * 100)}
+            min={0}
+            max={100}
+            step={1}
+            onChange={(v) => pushMetro({ ...metro, volume: v / 100 })}
+            onGestureChange={(on) => {
+              metroVolGesture.current = on;
+            }}
+          />
+        </div>
       </section>
 
       <section className="mb-4 grid gap-2 lg:grid-cols-[55fr_45fr] lg:items-stretch">
@@ -636,6 +754,7 @@ export default function Home() {
       <div className="grid items-start gap-x-8 gap-y-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <section>
         <Silk className="mb-2">Arp</Silk>
+        <div className="hw-inline">
         <div className="flex flex-wrap items-center gap-3">
           <HwToggle on={arpOn} onClick={() => setArpOn((v) => !v)}>
             On
@@ -703,6 +822,7 @@ export default function Home() {
             midi={midiFor("roll")}
           />
         </div>
+        </div>
       </section>
 
       <section>
@@ -710,6 +830,8 @@ export default function Home() {
           Loop{looper.clock_sync ? " · sync" : ""}
           {looper.pending ? " · wait" : ""}
         </Silk>
+        <div className="hw-inline">
+        <div>
         <div className="flex flex-wrap items-center gap-3">
           <HwToggleGroup
             label="Track"
@@ -807,6 +929,7 @@ export default function Home() {
             }}
           />
         </div>
+        </div>
         <div className="hw-knobs">
           <HwKnob
             label="Lvl 1"
@@ -840,6 +963,7 @@ export default function Home() {
             }}
             midi={midiFor("looper_level_2")}
           />
+        </div>
         </div>
         <div
           className="loop-playhead"

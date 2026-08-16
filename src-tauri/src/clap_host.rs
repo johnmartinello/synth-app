@@ -11,6 +11,10 @@ use crate::engine::{
 };
 use crate::envelope::EnvelopeParams;
 use crate::looper::{LooperEvent, LooperStatus};
+use crate::metronome::{
+    sanitize_bpm, sanitize_denominator, sanitize_numerator, sanitize_subdivision, MetronomeEvent,
+    MetronomeStatus,
+};
 use crate::midi::{self, MidiBytes, MidiPadState};
 use crate::midi_learn::{self, LearnableParam, MidiLearnMap, MidiLearnState};
 use clack_extensions::audio_ports::{AudioPortRescanFlags, HostAudioPortsImpl};
@@ -301,6 +305,14 @@ pub enum HostCommand {
     LooperMult {
         mult: u8,
     },
+    SetMetronome {
+        enabled: bool,
+        bpm: f32,
+        numerator: u8,
+        denominator: u8,
+        subdivision: u8,
+        volume: f32,
+    },
     IncomingMidi(MidiBytes),
     Shutdown,
 }
@@ -329,6 +341,8 @@ pub struct HostStatus {
     pub envelope: EnvelopeParams,
     #[serde(default)]
     pub looper: LooperStatus,
+    #[serde(default)]
+    pub metronome: MetronomeStatus,
 }
 
 #[derive(Clone, Serialize)]
@@ -369,6 +383,50 @@ impl Default for LooperSettings {
             muted: [false, false],
             levels: [1.0, 1.0],
             mult: 1,
+        }
+    }
+}
+
+struct MetronomeSettings {
+    enabled: bool,
+    user_bpm: f32,
+    live_bpm: f32,
+    numerator: u8,
+    denominator: u8,
+    subdivision: u8,
+    volume: f32,
+    midi_sync: bool,
+}
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            user_bpm: 120.0,
+            live_bpm: 120.0,
+            numerator: 4,
+            denominator: 4,
+            subdivision: 4,
+            volume: 0.5,
+            midi_sync: false,
+        }
+    }
+}
+
+impl MetronomeSettings {
+    fn to_status(&self) -> MetronomeStatus {
+        MetronomeStatus {
+            enabled: self.enabled,
+            bpm: if self.midi_sync {
+                self.live_bpm
+            } else {
+                self.user_bpm
+            },
+            numerator: self.numerator,
+            denominator: self.denominator,
+            subdivision: self.subdivision,
+            volume: self.volume,
+            midi_sync: self.midi_sync,
         }
     }
 }
@@ -493,6 +551,44 @@ fn copy_looper_controls(status: &mut HostStatus, settings: &LooperSettings) {
     status.looper.mult = settings.mult;
 }
 
+fn copy_metro(status: &mut HostStatus, metro: &MetronomeSettings) {
+    status.metronome = metro.to_status();
+}
+
+fn push_metro(prod: &mut Producer<EngineEvent>, metro: &MetronomeSettings) {
+    push_engine(
+        prod,
+        EngineEvent::Metronome(MetronomeEvent::SetEnabled {
+            on: metro.enabled,
+        }),
+    );
+    push_engine(
+        prod,
+        EngineEvent::Metronome(MetronomeEvent::SetBpm {
+            bpm: metro.live_bpm,
+        }),
+    );
+    push_engine(
+        prod,
+        EngineEvent::Metronome(MetronomeEvent::SetMeter {
+            numerator: metro.numerator,
+            denominator: metro.denominator,
+        }),
+    );
+    push_engine(
+        prod,
+        EngineEvent::Metronome(MetronomeEvent::SetSubdivision {
+            sub: metro.subdivision,
+        }),
+    );
+    push_engine(
+        prod,
+        EngineEvent::Metronome(MetronomeEvent::SetVolume {
+            norm: metro.volume,
+        }),
+    );
+}
+
 fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
     let Some(app) = app else {
         return;
@@ -510,11 +606,13 @@ struct MidiClock {
     ema_period: f64,
     live: bool,
     last_rate_emit: f32,
+    last_bpm_emit: f32,
 }
 
 struct ClockTickResult {
     became_live: bool,
     rate_hz: Option<f32>,
+    bpm: Option<f32>,
 }
 
 impl MidiClock {
@@ -524,6 +622,7 @@ impl MidiClock {
             ema_period: 0.0,
             live: false,
             last_rate_emit: 0.0,
+            last_bpm_emit: 0.0,
         }
     }
 
@@ -531,6 +630,7 @@ impl MidiClock {
         let now = Instant::now();
         let mut became_live = false;
         let mut rate_hz = None;
+        let mut bpm_out = None;
         if let Some(prev) = self.last {
             let dt = now.duration_since(prev).as_secs_f64();
             if dt > 0.0005 && dt < 0.2 {
@@ -541,6 +641,7 @@ impl MidiClock {
                 }
                 let bpm = 60.0 / (self.ema_period * MIDI_CLOCK_PPQN);
                 let hz = ((bpm / 60.0) * 4.0).clamp(0.25, 32.0) as f32;
+                let bpm_f = sanitize_bpm(bpm as f32);
                 if !self.live {
                     self.live = true;
                     became_live = true;
@@ -549,12 +650,25 @@ impl MidiClock {
                     self.last_rate_emit = hz;
                     rate_hz = Some(hz);
                 }
+                if became_live || (bpm_f - self.last_bpm_emit).abs() >= 0.25 {
+                    self.last_bpm_emit = bpm_f;
+                    bpm_out = Some(bpm_f);
+                }
             }
         }
         self.last = Some(now);
         ClockTickResult {
             became_live,
             rate_hz,
+            bpm: bpm_out,
+        }
+    }
+
+    fn current_bpm(&self) -> Option<f32> {
+        if self.live && self.last_bpm_emit > 0.0 {
+            Some(self.last_bpm_emit)
+        } else {
+            None
         }
     }
 
@@ -566,6 +680,7 @@ impl MidiClock {
             self.live = false;
             self.last = None;
             self.ema_period = 0.0;
+            self.last_bpm_emit = 0.0;
             true
         } else {
             false
@@ -749,6 +864,7 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
         envelope: EnvelopeParams::default(),
         looper: LooperStatus::default(),
+        metronome: MetronomeStatus::default(),
     };
     emit_status(&app, &status);
 
@@ -841,7 +957,9 @@ fn run_with_plugin(
     let mut last_env = u32::MAX;
     let mut last_looper = u64::MAX;
     let mut looper = LooperSettings::default();
+    let mut metro = MetronomeSettings::default();
     copy_looper_controls(status, &looper);
+    copy_metro(status, &metro);
 
     loop {
         while let Ok(bytes) = midi_bytes_rx.try_recv() {
@@ -855,6 +973,7 @@ fn run_with_plugin(
                 &mut held_pads,
                 &mut midi_clock,
                 &mut looper,
+                &mut metro,
                 status,
                 Some(&app),
             );
@@ -864,6 +983,17 @@ fn run_with_plugin(
                 &mut engine_prod,
                 EngineEvent::MidiClockSync { on: false },
             );
+            if metro.enabled {
+                metro.midi_sync = false;
+                metro.live_bpm = metro.user_bpm;
+                push_engine(
+                    &mut engine_prod,
+                    EngineEvent::Metronome(MetronomeEvent::SetBpm {
+                        bpm: metro.live_bpm,
+                    }),
+                );
+                copy_metro(status, &metro);
+            }
             copy_controls(status, &settings, false);
             emit_status(&app, status);
         }
@@ -899,6 +1029,7 @@ fn run_with_plugin(
                 &mut held_pads,
                 &mut midi_clock,
                 &mut looper,
+                &mut metro,
                 status,
             );
         }
@@ -923,6 +1054,7 @@ fn run_with_plugin(
                 &mut held_pads,
                 &mut midi_clock,
                 &mut looper,
+                &mut metro,
                 status,
             );
         }
@@ -1005,12 +1137,13 @@ fn handle_incoming_midi(
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     looper: &mut LooperSettings,
+    metro: &mut MetronomeSettings,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
     let slice = &bytes.data[..bytes.len as usize];
     if slice.len() == 1 {
-        handle_midi_realtime(slice[0], settings, prod, midi_clock, status, app);
+        handle_midi_realtime(slice[0], settings, prod, midi_clock, metro, status, app);
         return;
     }
     let Ok(msg) = MidiMessage::try_from(slice) else {
@@ -1255,6 +1388,7 @@ fn handle_midi_realtime(
     settings: &mut EngineSettings,
     prod: &mut Producer<EngineEvent>,
     midi_clock: &mut MidiClock,
+    metro: &mut MetronomeSettings,
     host_status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
@@ -1270,6 +1404,22 @@ fn handle_midi_realtime(
                 settings.arp_rate_hz = hz;
                 push_arp(prod, settings);
                 changed = true;
+            }
+            if metro.enabled {
+                if let Some(bpm) = result.bpm {
+                    metro.midi_sync = true;
+                    metro.live_bpm = bpm;
+                    push_engine(
+                        prod,
+                        EngineEvent::Metronome(MetronomeEvent::SetBpm { bpm }),
+                    );
+                    copy_metro(host_status, metro);
+                    changed = true;
+                } else if result.became_live {
+                    metro.midi_sync = true;
+                    copy_metro(host_status, metro);
+                    changed = true;
+                }
             }
             if changed {
                 copy_controls(host_status, settings, midi_clock.live);
@@ -1362,6 +1512,7 @@ fn handle_command(
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     looper: &mut LooperSettings,
+    metro: &mut MetronomeSettings,
     status: &mut HostStatus,
 ) {
     match cmd {
@@ -1377,6 +1528,7 @@ fn handle_command(
                 held_pads,
                 midi_clock,
                 looper,
+                metro,
                 status,
                 Some(app),
             );
@@ -1670,6 +1822,31 @@ fn handle_command(
                 copy_looper_controls(status, looper);
                 emit_status(app, status);
             }
+        }
+        HostCommand::SetMetronome {
+            enabled,
+            bpm,
+            numerator,
+            denominator,
+            subdivision,
+            volume,
+        } => {
+            metro.enabled = enabled;
+            metro.user_bpm = sanitize_bpm(bpm);
+            if enabled && midi_clock.live {
+                metro.midi_sync = true;
+                metro.live_bpm = midi_clock.current_bpm().unwrap_or(metro.user_bpm);
+            } else {
+                metro.midi_sync = false;
+                metro.live_bpm = metro.user_bpm;
+            }
+            metro.numerator = sanitize_numerator(numerator);
+            metro.denominator = sanitize_denominator(denominator);
+            metro.subdivision = sanitize_subdivision(subdivision);
+            metro.volume = volume.clamp(0.0, 1.0);
+            push_metro(prod, metro);
+            copy_metro(status, metro);
+            emit_status(app, status);
         }
     }
 }

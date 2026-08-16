@@ -106,6 +106,12 @@ enum PendingAction {
     Stop,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuantizeTo {
+    Bar,
+    Subdivision,
+}
+
 struct Track {
     live: Vec<f32>,
     undo: Vec<f32>,
@@ -163,7 +169,8 @@ pub struct Looper {
     write_track: Option<usize>,
     clock_synced: bool,
     clock_pulses: u8,
-    pending: Option<PendingAction>,
+    bar_frames: usize,
+    pending: Option<(PendingAction, QuantizeTo)>,
 }
 
 impl Looper {
@@ -196,6 +203,7 @@ impl Looper {
             write_track: None,
             clock_synced: false,
             clock_pulses: 0,
+            bar_frames: 0,
             pending: None,
         }
     }
@@ -232,10 +240,14 @@ impl Looper {
         self.clock_synced = on;
         self.clock_pulses = 0;
         if was && !on {
-            if let Some(action) = self.pending.take() {
+            if let Some((action, _)) = self.pending.take() {
                 self.run_pending(action);
             }
         }
+    }
+
+    pub fn set_bar_frames(&mut self, frames: usize) {
+        self.bar_frames = frames;
     }
 
     pub fn clock_tick(&mut self) {
@@ -245,9 +257,29 @@ impl Looper {
         self.clock_pulses = self.clock_pulses.saturating_add(1);
         if self.clock_pulses >= CLOCK_PULSES_PER_16TH {
             self.clock_pulses = 0;
-            if let Some(action) = self.pending.take() {
+            if let Some((action, _)) = self.pending.take() {
                 self.run_pending(action);
             }
+        }
+    }
+
+    pub fn subdivision_tick(&mut self) {
+        if !self.clock_synced {
+            return;
+        }
+        if let Some((action, QuantizeTo::Subdivision)) = self.pending {
+            self.pending = None;
+            self.run_pending(action);
+        }
+    }
+
+    pub fn bar_tick(&mut self) {
+        if !self.clock_synced {
+            return;
+        }
+        if let Some((action, QuantizeTo::Bar)) = self.pending {
+            self.pending = None;
+            self.run_pending(action);
         }
     }
 
@@ -279,9 +311,29 @@ impl Looper {
 
     fn queue_or_run(&mut self, action: PendingAction) {
         if self.clock_synced {
-            self.pending = Some(action);
+            self.pending = Some((action, self.quantize_for(action)));
         } else {
             self.run_pending(action);
+        }
+    }
+
+    fn quantize_for(&self, action: PendingAction) -> QuantizeTo {
+        if self.bar_frames == 0 {
+            return QuantizeTo::Subdivision;
+        }
+        let t1_first = self.selected == 0
+            && matches!(
+                self.tracks[0].mode,
+                TrackMode::Empty | TrackMode::Recording
+            );
+        match action {
+            PendingAction::RecPlay if t1_first => QuantizeTo::Bar,
+            PendingAction::Stop
+                if self.selected == 0 && self.tracks[0].mode == TrackMode::Recording =>
+            {
+                QuantizeTo::Bar
+            }
+            _ => QuantizeTo::Subdivision,
         }
     }
 
@@ -347,7 +399,8 @@ impl Looper {
             if self.tracks[0].rec_frames < self.min_frames {
                 return;
             }
-            let len = self.tracks[0].rec_frames.min(self.max_frames);
+            let raw = self.tracks[0].rec_frames.min(self.max_frames);
+            let len = snap_to_bars(raw, self.bar_frames, self.min_frames, self.max_frames);
             self.tracks[0].len = len;
             self.apply_splice(0);
             self.cycle = 0;
@@ -660,6 +713,14 @@ impl Looper {
     }
 }
 
+fn snap_to_bars(rec: usize, bar: usize, min: usize, max: usize) -> usize {
+    if bar == 0 {
+        return rec.clamp(min, max);
+    }
+    let bars = ((rec as f64 / bar as f64).round() as usize).max(1);
+    bars.saturating_mul(bar).clamp(min, max)
+}
+
 fn window_gain(i: usize, w: usize) -> f32 {
     if w == 0 {
         return 1.0;
@@ -840,6 +901,42 @@ mod tests {
             assert_eq!(l.tracks[0].mode, TrackMode::Empty);
         }
         l.clock_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Recording);
+        assert!(l.pending.is_none());
+    }
+
+    #[test]
+    fn first_take_snaps_to_nearest_bar() {
+        let mut l = test_looper();
+        l.set_bar_frames(400);
+        l.handle(LooperEvent::TapRecPlay);
+        let mut a = const_stereo(450, 0.5);
+        process(&mut l, &mut a);
+        l.handle(LooperEvent::TapRecPlay);
+        assert_eq!(l.tracks[0].mode, TrackMode::Playing);
+        assert_eq!(l.tracks[0].len, 400);
+
+        let mut l = test_looper();
+        l.set_bar_frames(400);
+        l.handle(LooperEvent::TapRecPlay);
+        let mut b = const_stereo(620, 0.5);
+        process(&mut l, &mut b);
+        l.handle(LooperEvent::TapRecPlay);
+        assert_eq!(l.tracks[0].mode, TrackMode::Playing);
+        assert_eq!(l.tracks[0].len, 800);
+    }
+
+    #[test]
+    fn pending_rec_waits_for_bar_tick() {
+        let mut l = test_looper();
+        l.set_bar_frames(400);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::TapRecPlay);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        assert!(l.pending.is_some());
+        l.subdivision_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        l.bar_tick();
         assert_eq!(l.tracks[0].mode, TrackMode::Recording);
         assert!(l.pending.is_none());
     }

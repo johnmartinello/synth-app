@@ -187,6 +187,19 @@ function snap(value: number, min: number, max: number, step: number) {
   return Math.min(max, Math.max(min, min + Math.round((raw - min) / step) * step));
 }
 
+function editSeed(value: number, step: number) {
+  if (step >= 1) return String(Math.round(value));
+  const decimals = Math.min(4, Math.max(0, Math.ceil(-Math.log10(step))));
+  return value.toFixed(decimals);
+}
+
+function parseTyped(raw: string): number | null {
+  const m = raw.trim().replace(",", ".").match(/-?\d*\.?\d+/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
 export type HwKnobMidi = {
   paramId: string;
   cc?: number;
@@ -297,6 +310,9 @@ export function HwKnob({
 }: HwKnobProps) {
   const id = useId();
   const drag = useRef<{ y: number; value: number } | null>(null);
+  const editRef = useRef<HTMLSpanElement>(null);
+  const skipCommit = useRef(false);
+  const [editing, setEditing] = useState(false);
   const span = Math.max(0.0001, max - min);
   const pct = (value - min) / span;
   const angle = -135 + pct * 270;
@@ -305,6 +321,34 @@ export function HwKnob({
     const snapped = snap(next, min, max, step);
     if (snapped !== value) onChange(snapped);
   };
+
+  const beginEdit = () => {
+    if (disabled) return;
+    skipCommit.current = false;
+    setEditing(true);
+    onGestureChange?.(true);
+  };
+
+  const finishEdit = (commit: boolean) => {
+    const raw = editRef.current?.textContent ?? "";
+    const parsed = commit ? parseTyped(raw) : null;
+    setEditing(false);
+    onGestureChange?.(false);
+    if (parsed != null) apply(parsed);
+  };
+
+  useEffect(() => {
+    if (!editing) return;
+    const el = editRef.current;
+    if (!el) return;
+    el.textContent = editSeed(value, step);
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }, [editing, step, value]);
 
   return (
     <div className="hw-knob" data-disabled={disabled ? "true" : undefined}>
@@ -377,7 +421,226 @@ export function HwKnob({
         </div>
         {midi ? <HwMidiChip midi={midi} label={label} /> : null}
       </div>
-      <span className="hw-knob-value">{display ?? String(value)}</span>
+      <div className="hw-knob-value-slot">
+        {editing ? (
+          <span
+            ref={editRef}
+            className="hw-knob-value hw-knob-value-edit"
+            contentEditable
+            suppressContentEditableWarning
+            role="textbox"
+            inputMode="decimal"
+            aria-label={`Edit ${label ?? "value"}`}
+            onBlur={() => {
+              if (skipCommit.current) {
+                skipCommit.current = false;
+                finishEdit(false);
+                return;
+              }
+              finishEdit(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                finishEdit(true);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                skipCommit.current = true;
+                e.currentTarget.blur();
+              }
+              e.stopPropagation();
+            }}
+          />
+        ) : (
+          <span
+            className="hw-knob-value"
+            title={disabled ? undefined : "Double-click to type a value"}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              beginEdit();
+            }}
+          >
+            {display ?? String(value)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type HwDragValueProps = {
+  label?: string;
+  display?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+  onChange: (v: number) => void;
+  onGestureChange?: (dragging: boolean) => void;
+};
+
+export function HwDragValue({
+  label,
+  display,
+  value,
+  min,
+  max,
+  step,
+  disabled = false,
+  onChange,
+  onGestureChange,
+}: HwDragValueProps) {
+  const editRef = useRef<HTMLSpanElement>(null);
+  const skipCommit = useRef(false);
+  const drag = useRef<{ x: number; value: number; moved: boolean } | null>(null);
+  const [editing, setEditing] = useState(false);
+
+  const apply = (next: number) => {
+    const snapped = snap(next, min, max, step);
+    if (snapped !== value) onChange(snapped);
+  };
+
+  const beginEdit = () => {
+    if (disabled) return;
+    drag.current = null;
+    skipCommit.current = false;
+    setEditing(true);
+    onGestureChange?.(true);
+  };
+
+  const finishEdit = (commit: boolean) => {
+    const raw = editRef.current?.textContent ?? "";
+    const parsed = commit ? parseTyped(raw) : null;
+    setEditing(false);
+    onGestureChange?.(false);
+    if (parsed != null) apply(parsed);
+  };
+
+  useEffect(() => {
+    if (!editing) return;
+    const el = editRef.current;
+    if (!el) return;
+    el.textContent = editSeed(value, step);
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }, [editing, step, value]);
+
+  return (
+    <div className="hw-drag" data-disabled={disabled ? "true" : undefined}>
+      {label ? <Silk>{label}</Silk> : null}
+      {editing ? (
+        <span
+          ref={editRef}
+          className="hw-drag-value hw-drag-value-edit"
+          contentEditable
+          suppressContentEditableWarning
+          role="textbox"
+          inputMode="decimal"
+          aria-label={`Edit ${label ?? "value"}`}
+          onBlur={() => {
+            if (skipCommit.current) {
+              skipCommit.current = false;
+              finishEdit(false);
+              return;
+            }
+            finishEdit(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              finishEdit(true);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              skipCommit.current = true;
+              e.currentTarget.blur();
+            }
+            e.stopPropagation();
+          }}
+        />
+      ) : (
+        <span
+          className="hw-drag-value"
+          role="slider"
+          tabIndex={disabled ? -1 : 0}
+          aria-disabled={disabled || undefined}
+          aria-label={label ?? "Value"}
+          aria-valuemin={min}
+          aria-valuemax={max}
+          aria-valuenow={value}
+          aria-valuetext={display ?? String(value)}
+          title={disabled ? undefined : "Drag sideways to change, double-click to type"}
+          onPointerDown={(e) => {
+            if (disabled || e.button !== 0) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            drag.current = { x: e.clientX, value, moved: false };
+            onGestureChange?.(true);
+          }}
+          onPointerMove={(e) => {
+            if (disabled) return;
+            const start = drag.current;
+            if (!start) return;
+            const dx = e.clientX - start.x;
+            if (!start.moved && Math.abs(dx) < 3) return;
+            start.moved = true;
+            const fine = e.shiftKey ? 0.25 : 1;
+            apply(start.value + dx * step * fine);
+          }}
+          onPointerUp={(e) => {
+            if (drag.current) {
+              drag.current = null;
+              onGestureChange?.(false);
+            }
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            }
+          }}
+          onPointerCancel={() => {
+            if (!drag.current) return;
+            drag.current = null;
+            onGestureChange?.(false);
+          }}
+          onDoubleClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            beginEdit();
+          }}
+          onWheel={(e) => {
+            if (disabled) return;
+            e.preventDefault();
+            const dir = e.deltaY > 0 ? -1 : 1;
+            const fine = e.shiftKey ? 0.25 : 1;
+            apply(value + dir * step * fine);
+          }}
+          onKeyDown={(e) => {
+            if (disabled) return;
+            if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+              e.preventDefault();
+              apply(value + step);
+            } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+              e.preventDefault();
+              apply(value - step);
+            } else if (e.key === "Home") {
+              e.preventDefault();
+              apply(min);
+            } else if (e.key === "End") {
+              e.preventDefault();
+              apply(max);
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              beginEdit();
+            }
+          }}
+        >
+          {display ?? String(value)}
+        </span>
+      )}
     </div>
   );
 }

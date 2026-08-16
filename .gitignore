@@ -24,6 +24,12 @@ node_modules/
 # production
 /build
 
+# local backlog
+TODO.md
+
+# cursor
+.cursor/
+
 # misc
 .DS_Store
 *.pem

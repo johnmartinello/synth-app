@@ -4,6 +4,7 @@ mod discovery;
 mod engine;
 mod envelope;
 mod looper;
+mod metronome;
 mod midi;
 mod midi_learn;
 mod presets;
@@ -13,6 +14,7 @@ use crossbeam_channel::Sender;
 use engine::{ArpMode, ChordType, ScaleKind, Secondary};
 use envelope::EnvelopeParams;
 use looper::LooperStatus;
+use metronome::MetronomeStatus;
 use midi_learn::{LearnableParam, MidiLearnMap};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -65,6 +67,7 @@ fn get_status() -> HostStatus {
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
         envelope: EnvelopeParams::default(),
         looper: LooperStatus::default(),
+        metronome: MetronomeStatus::default(),
     })
 }
 
@@ -267,6 +270,29 @@ fn looper_mult(state: tauri::State<AppState>, mult: u8) -> Result<(), String> {
     send_cmd(&state, HostCommand::LooperMult { mult })
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_metronome(
+    state: tauri::State<AppState>,
+    enabled: bool,
+    bpm: f32,
+    numerator: u8,
+    denominator: u8,
+    subdivision: u8,
+    volume: f32,
+) -> Result<(), String> {
+    send_cmd(
+        &state,
+        HostCommand::SetMetronome {
+            enabled,
+            bpm,
+            numerator,
+            denominator,
+            subdivision,
+            volume,
+        },
+    )
+}
+
 #[tauri::command]
 fn set_strum_mode(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetStrumMode { enabled })
@@ -370,6 +396,7 @@ pub fn run() {
             looper_mute,
             looper_level,
             looper_mult,
+            set_metronome,
             set_strum_mode,
             set_sustain,
             set_sustain_hold,
