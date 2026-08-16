@@ -3,6 +3,7 @@ mod clap_host;
 mod discovery;
 mod engine;
 mod envelope;
+mod looper;
 mod midi;
 mod midi_learn;
 mod presets;
@@ -11,6 +12,7 @@ use clap_host::{HostCommand, HostStatus};
 use crossbeam_channel::Sender;
 use engine::{ArpMode, ChordType, ScaleKind, Secondary};
 use envelope::EnvelopeParams;
+use looper::LooperStatus;
 use midi_learn::{LearnableParam, MidiLearnMap};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -62,6 +64,7 @@ fn get_status() -> HostStatus {
         midi_learn: None,
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
         envelope: EnvelopeParams::default(),
+        looper: LooperStatus::default(),
     })
 }
 
@@ -225,6 +228,46 @@ fn unmap_midi(state: tauri::State<AppState>, param_id: String) -> Result<(), Str
 }
 
 #[tauri::command]
+fn looper_rec_play(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperRecPlay)
+}
+
+#[tauri::command]
+fn looper_stop(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperStop)
+}
+
+#[tauri::command]
+fn looper_undo(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperUndo)
+}
+
+#[tauri::command]
+fn looper_clear(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperClear)
+}
+
+#[tauri::command]
+fn looper_select(state: tauri::State<AppState>, track: u8) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperSelect { track })
+}
+
+#[tauri::command]
+fn looper_mute(state: tauri::State<AppState>, track: u8, on: bool) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperMute { track, on })
+}
+
+#[tauri::command]
+fn looper_level(state: tauri::State<AppState>, track: u8, value: f32) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperLevel { track, value })
+}
+
+#[tauri::command]
+fn looper_mult(state: tauri::State<AppState>, mult: u8) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperMult { mult })
+}
+
+#[tauri::command]
 fn set_strum_mode(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetStrumMode { enabled })
 }
@@ -319,6 +362,14 @@ pub fn run() {
             start_midi_learn,
             cancel_midi_learn,
             unmap_midi,
+            looper_rec_play,
+            looper_stop,
+            looper_undo,
+            looper_clear,
+            looper_select,
+            looper_mute,
+            looper_level,
+            looper_mult,
             set_strum_mode,
             set_sustain,
             set_sustain_hold,

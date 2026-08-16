@@ -7,6 +7,7 @@ pub use config::FullAudioConfig;
 
 use crate::clap_host::CpalHost;
 use crate::engine::{AudioEngine, EngineEvent, GeneratedNote};
+use crate::looper::{Looper, LooperStatus};
 use crate::midi;
 use buffers::HostAudioBuffers;
 use clack_host::prelude::*;
@@ -179,6 +180,7 @@ struct StreamAudioProcessor {
     buffers: HostAudioBuffers,
     engine_consumer: Consumer<EngineEvent>,
     engine: AudioEngine,
+    looper: Looper,
     events: EventBuffer,
     generated: Vec<GeneratedNote>,
     note_port: Option<(u16, bool)>,
@@ -194,11 +196,13 @@ impl StreamAudioProcessor {
         note_port: Option<(u16, bool)>,
     ) -> Self {
         let sample_rate = config.sample_rate as f64;
+        let channels = config.output_channel_count;
         Self {
             audio_processor: plugin_instance,
             buffers: HostAudioBuffers::from_config(config),
             engine_consumer,
             engine: AudioEngine::new(sample_rate),
+            looper: Looper::new(sample_rate, channels),
             events: EventBuffer::with_capacity(256),
             generated: Vec::with_capacity(64),
             note_port,
@@ -213,7 +217,18 @@ impl StreamAudioProcessor {
 
         self.generated.clear();
         while let Ok(ev) = self.engine_consumer.pop() {
-            self.engine.handle(ev, 0, &mut self.generated);
+            match ev {
+                EngineEvent::Looper(cmd) => self.looper.handle(cmd),
+                EngineEvent::MidiClockSync { on } => {
+                    self.looper.set_clock_sync(on);
+                    self.engine.handle(ev, 0, &mut self.generated);
+                }
+                EngineEvent::MidiClockTick => {
+                    self.looper.clock_tick();
+                    self.engine.handle(ev, 0, &mut self.generated);
+                }
+                other => self.engine.handle(other, 0, &mut self.generated),
+            }
         }
         let (env_start, env_end) = self
             .engine
@@ -247,9 +262,11 @@ impl StreamAudioProcessor {
             Ok(_) => {
                 self.lowpass.set_norm(filter_norm());
                 let lp = &mut self.lowpass;
+                let looper = &mut self.looper;
                 self.buffers.write_to_cpal_buffer(data, |buf, ch| {
                     lp.process_interleaved(buf, ch);
                     apply_env_gain(buf, ch, env_start, env_end);
+                    looper.process_interleaved(buf, ch);
                 });
             }
             Err(e) => log::error!("Plugin process error: {e}"),
@@ -257,6 +274,7 @@ impl StreamAudioProcessor {
         self.steady_counter += sample_count as u64;
         publish_sounding(&self.engine);
         publish_env(&self.engine);
+        publish_looper(&self.looper);
     }
 }
 
@@ -265,6 +283,9 @@ static SOUNDING_HI: AtomicU64 = AtomicU64::new(0);
 static ENV_STAGE: AtomicU32 = AtomicU32::new(0);
 static ENV_PROGRESS: AtomicU32 = AtomicU32::new(0);
 static ENV_LEVEL: AtomicU32 = AtomicU32::new(0);
+static LOOPER_PACKED: AtomicU32 = AtomicU32::new(0);
+static LOOPER_PLAYHEAD: AtomicU32 = AtomicU32::new(0);
+static LOOPER_LEVELS: AtomicU64 = AtomicU64::new(0x3f80_0000_3f80_0000);
 
 fn publish_sounding(engine: &AudioEngine) {
     let [lo, hi] = engine.sounding_mask();
@@ -277,6 +298,64 @@ fn publish_env(engine: &AudioEngine) {
     ENV_STAGE.store(stage as u32, Ordering::Relaxed);
     ENV_PROGRESS.store(progress.to_bits(), Ordering::Relaxed);
     ENV_LEVEL.store(level.to_bits(), Ordering::Relaxed);
+}
+
+fn publish_looper(looper: &Looper) {
+    let snap = looper.snapshot();
+    LOOPER_PACKED.store(pack_looper(&snap), Ordering::Relaxed);
+    LOOPER_PLAYHEAD.store(snap.playhead.to_bits(), Ordering::Relaxed);
+    let lo = snap.levels[0].to_bits() as u64;
+    let hi = snap.levels[1].to_bits() as u64;
+    LOOPER_LEVELS.store(lo | (hi << 32), Ordering::Relaxed);
+}
+
+fn pack_looper(s: &LooperStatus) -> u32 {
+    u32::from(s.selected & 3)
+        | (u32::from(s.modes[0] & 7) << 2)
+        | (u32::from(s.modes[1] & 7) << 5)
+        | (u32::from(s.muted[0]) << 8)
+        | (u32::from(s.muted[1]) << 9)
+        | (u32::from(s.has_phrase[0]) << 10)
+        | (u32::from(s.has_phrase[1]) << 11)
+        | (u32::from(s.mult & 7) << 12)
+        | (u32::from(s.max_mult & 7) << 15)
+        | (u32::from(s.clock_sync) << 18)
+        | (u32::from(s.pending) << 19)
+}
+
+fn unpack_looper(packed: u32, playhead: f32, levels: [f32; 2]) -> LooperStatus {
+    LooperStatus {
+        selected: (packed & 3) as u8,
+        modes: [((packed >> 2) & 7) as u8, ((packed >> 5) & 7) as u8],
+        muted: [(packed >> 8) & 1 != 0, (packed >> 9) & 1 != 0],
+        has_phrase: [(packed >> 10) & 1 != 0, (packed >> 11) & 1 != 0],
+        playhead: playhead.clamp(0.0, 1.0),
+        levels: [levels[0].clamp(0.0, 1.0), levels[1].clamp(0.0, 1.0)],
+        mult: match ((packed >> 12) & 7) as u8 {
+            2 => 2,
+            4 => 4,
+            _ => 1,
+        },
+        max_mult: match ((packed >> 15) & 7) as u8 {
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        },
+        clock_sync: (packed >> 18) & 1 != 0,
+        pending: (packed >> 19) & 1 != 0,
+    }
+}
+
+pub fn looper_snapshot() -> LooperStatus {
+    let packed_levels = LOOPER_LEVELS.load(Ordering::Relaxed);
+    unpack_looper(
+        LOOPER_PACKED.load(Ordering::Relaxed),
+        f32::from_bits(LOOPER_PLAYHEAD.load(Ordering::Relaxed)),
+        [
+            f32::from_bits(packed_levels as u32),
+            f32::from_bits((packed_levels >> 32) as u32),
+        ],
+    )
 }
 
 pub fn env_playhead() -> (u8, f32, f32) {

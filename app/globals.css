@@ -77,6 +77,57 @@ input {
   border-color: var(--cream);
 }
 
+.hw-btn[data-mode="rec"] {
+  background: #8a3030;
+  color: #f0d0c8;
+  border-color: #c05040;
+}
+
+.hw-btn[data-mode="play"] {
+  background: #2a5a38;
+  color: #c8e8d0;
+  border-color: #4a8a58;
+}
+
+.hw-btn[data-mode="dub"] {
+  background: #8a7030;
+  color: #f0e0b0;
+  border-color: #c0a040;
+}
+
+.hw-stomp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.loop-playhead {
+  position: relative;
+  height: 6px;
+  margin-top: 0.65rem;
+  background: var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+
+.loop-playhead > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber);
+  left: calc(var(--pos, 0) * 100%);
+  transform: translateX(-50%);
+}
+
+.loop-playhead[data-rec="true"] {
+  box-shadow: inset 0 0 0 1px #8a3030;
+}
+
+.loop-playhead[data-pending="true"] > i {
+  background: var(--cream);
+}
+
 .hw-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
@@ -383,7 +434,7 @@ input {
   left: 0;
   right: 0;
   display: grid;
-  grid-template-columns: 13rem minmax(0, 1fr);
+  grid-template-columns: 16rem minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   height: 22rem;
   max-height: min(22rem, 70vh);
@@ -407,6 +458,45 @@ input {
   margin: 0;
   padding: 0.35rem;
   list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) var(--face);
+}
+
+.patch-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  align-content: start;
+  gap: 0.1rem 0.35rem;
+}
+
+.patch-list > li:only-child {
+  grid-column: 1 / -1;
+}
+
+.patch-list[data-search="true"] {
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+}
+
+.patch-tree::-webkit-scrollbar,
+.patch-list::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.patch-tree::-webkit-scrollbar-track,
+.patch-list::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.patch-tree::-webkit-scrollbar-thumb,
+.patch-list::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--r);
+}
+
+.patch-tree::-webkit-scrollbar-thumb:hover,
+.patch-list::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 .patch-tree {
@@ -414,12 +504,83 @@ input {
 }
 
 .patch-tree-bank {
+  position: sticky;
+  top: -0.35rem;
+  z-index: 1;
   padding: 0.45rem 0.4rem 0.2rem;
+  background: var(--bg);
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 10px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.patch-tree-pack {
+  margin-top: 0.1rem;
+}
+
+.patch-tree-pack-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  border-radius: var(--r);
+  padding: 0.3rem 0.4rem;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.patch-tree-pack-btn:hover {
+  background: var(--face);
+}
+
+.patch-tree-pack-btn[data-on="true"],
+.patch-tree-pack-btn[data-active="true"] {
+  color: var(--amber);
+}
+
+.patch-tree-pack-btn[data-on="true"] {
+  background: var(--face);
+}
+
+.patch-tree-chevron {
+  width: 0.7rem;
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.patch-tree-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.15rem 0.2rem 0.35rem;
+}
+
+.patch-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--face);
+  color: var(--ink);
+  border-radius: var(--r);
+  padding: 0.2rem 0.4rem;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.patch-chip:hover {
+  border-color: var(--muted);
+}
+
+.patch-chip[data-on="true"] {
+  color: var(--amber);
+  border-color: var(--amber);
 }
 
 .patch-item {
@@ -434,6 +595,9 @@ input {
   padding: 0.35rem 0.5rem;
   font-size: 12px;
   cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .patch-item:hover {
@@ -456,6 +620,10 @@ input {
     border-right: 0;
     border-bottom: 1px solid var(--line);
     max-height: 8rem;
+  }
+
+  .patch-list {
+    grid-template-columns: 1fr;
   }
 }
 

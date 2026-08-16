@@ -32,6 +32,12 @@ pub enum LearnableParam {
     EnvDecay,
     EnvSustain,
     EnvRelease,
+    LooperRecPlay,
+    LooperStop,
+    LooperUndo,
+    LooperMute,
+    LooperLevel1,
+    LooperLevel2,
 }
 
 impl LearnableParam {
@@ -46,6 +52,12 @@ impl LearnableParam {
             Self::EnvDecay => "env_decay",
             Self::EnvSustain => "env_sustain",
             Self::EnvRelease => "env_release",
+            Self::LooperRecPlay => "looper_rec_play",
+            Self::LooperStop => "looper_stop",
+            Self::LooperUndo => "looper_undo",
+            Self::LooperMute => "looper_mute",
+            Self::LooperLevel1 => "looper_level_1",
+            Self::LooperLevel2 => "looper_level_2",
         }
     }
 
@@ -60,6 +72,12 @@ impl LearnableParam {
             "env_decay" => Some(Self::EnvDecay),
             "env_sustain" => Some(Self::EnvSustain),
             "env_release" => Some(Self::EnvRelease),
+            "looper_rec_play" => Some(Self::LooperRecPlay),
+            "looper_stop" => Some(Self::LooperStop),
+            "looper_undo" => Some(Self::LooperUndo),
+            "looper_mute" => Some(Self::LooperMute),
+            "looper_level" | "looper_level_1" => Some(Self::LooperLevel1),
+            "looper_level_2" => Some(Self::LooperLevel2),
             _ => None,
         }
     }
@@ -73,6 +91,13 @@ impl LearnableParam {
                 | Self::EnvDecay
                 | Self::EnvSustain
                 | Self::EnvRelease
+        )
+    }
+
+    pub fn is_trigger(self) -> bool {
+        matches!(
+            self,
+            Self::LooperRecPlay | Self::LooperStop | Self::LooperUndo | Self::LooperMute
         )
     }
 }
@@ -93,7 +118,14 @@ pub fn cc_to_value(param: LearnableParam, val: u8) -> f32 {
     let n = val as f32 / 127.0;
     match param {
         LearnableParam::ArpRate => 1.0 + n * 15.0,
-        LearnableParam::Filter | LearnableParam::EnvSustain => n,
+        LearnableParam::Filter
+        | LearnableParam::EnvSustain
+        | LearnableParam::LooperLevel1
+        | LearnableParam::LooperLevel2 => n,
+        LearnableParam::LooperRecPlay
+        | LearnableParam::LooperStop
+        | LearnableParam::LooperUndo
+        | LearnableParam::LooperMute => 0.0,
         LearnableParam::Roll => crate::engine::sanitize_roll_ms(n * crate::engine::ROLL_MAX_MS),
         LearnableParam::EnvDelay
         | LearnableParam::EnvAttack
@@ -206,6 +238,7 @@ pub struct MidiLearnState {
     pub map: MidiLearnMap,
     pub armed: Option<LearnableParam>,
     armed_at: Option<Instant>,
+    pub trigger_high: HashMap<LearnableParam, bool>,
 }
 
 impl MidiLearnState {
@@ -214,6 +247,7 @@ impl MidiLearnState {
             map,
             armed: None,
             armed_at: None,
+            trigger_high: HashMap::new(),
         }
     }
 
@@ -360,6 +394,10 @@ mod tests {
         assert_eq!(cc_to_value(LearnableParam::EnvDelay, 0), 0.0);
         assert!((cc_to_value(LearnableParam::EnvAttack, 127) - 32.0).abs() < 0.02);
         assert!((cc_to_value(LearnableParam::EnvSustain, 64) - 64.0 / 127.0).abs() < 1e-5);
+        assert!((cc_to_value(LearnableParam::LooperLevel1, 127) - 1.0).abs() < 1e-5);
+        assert!((cc_to_value(LearnableParam::LooperLevel2, 0)).abs() < 1e-5);
+        assert!(LearnableParam::LooperRecPlay.is_trigger());
+        assert!(!LearnableParam::LooperLevel1.is_trigger());
     }
 
     #[test]
@@ -393,6 +431,12 @@ mod tests {
             LearnableParam::EnvDecay,
             LearnableParam::EnvSustain,
             LearnableParam::EnvRelease,
+            LearnableParam::LooperRecPlay,
+            LearnableParam::LooperStop,
+            LearnableParam::LooperUndo,
+            LearnableParam::LooperMute,
+            LearnableParam::LooperLevel1,
+            LearnableParam::LooperLevel2,
         ] {
             assert_eq!(LearnableParam::from_id(param.as_id()), Some(param));
         }

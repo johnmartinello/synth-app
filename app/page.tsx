@@ -2,9 +2,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
-import { HwButton, HwKnob, HwMenu, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
+import { HwButton, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
 type DiscoveryReport = {
   searched_paths: string[];
@@ -37,6 +37,33 @@ type HostStatus = {
   midi_learn?: string | null;
   midi_maps?: Record<string, number>;
   envelope?: EnvParams;
+  looper?: LooperStatus;
+};
+
+type LooperStatus = {
+  selected: number;
+  modes: [number, number];
+  muted: [boolean, boolean];
+  has_phrase: [boolean, boolean];
+  playhead: number;
+  levels: [number, number];
+  mult: number;
+  max_mult: number;
+  clock_sync: boolean;
+  pending: boolean;
+};
+
+const DEFAULT_LOOPER: LooperStatus = {
+  selected: 0,
+  modes: [0, 0],
+  muted: [false, false],
+  has_phrase: [false, false],
+  playhead: 0,
+  levels: [1, 1],
+  mult: 1,
+  max_mult: 4,
+  clock_sync: false,
+  pending: false,
 };
 
 type PresetInfo = {
@@ -136,6 +163,7 @@ export default function Home() {
   const [rollMs, setRollMs] = useState(0);
   const [strumMode, setStrumMode] = useState(false);
   const [env, setEnv] = useState<EnvParams>(DEFAULT_ENV);
+  const [looper, setLooper] = useState<LooperStatus>(DEFAULT_LOOPER);
   const [engineNotes, setEngineNotes] = useState<number[] | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const autoMidiRef = useRef(false);
@@ -143,6 +171,7 @@ export default function Home() {
   const filterGesture = useRef(false);
   const rollGesture = useRef(false);
   const envGesture = useRef(false);
+  const levelGesture = useRef<number | null>(null);
 
   const previewNotes = useMemo(() => {
     if (held.size > 0) {
@@ -192,6 +221,7 @@ export default function Home() {
         if (typeof next.filter_cutoff === "number") setFilter(next.filter_cutoff);
         if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
         if (next.envelope) setEnv(next.envelope);
+        if (next.looper) setLooper(next.looper);
       } catch {
         /* web preview without Tauri */
       }
@@ -212,6 +242,9 @@ export default function Home() {
           }
           if (next.envelope && !envGesture.current) {
             setEnv(next.envelope);
+          }
+          if (next.looper && levelGesture.current == null) {
+            setLooper(next.looper);
           }
         });
       } catch {
@@ -248,6 +281,29 @@ export default function Home() {
           const next = ev.payload.held;
           setHeld(new Set(next));
           setArmed(next.at(-1) ?? null);
+        });
+      } catch {
+        /* not in Tauri */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listen<LooperStatus>("looper-ui", (ev) => {
+          const next = ev.payload;
+          setLooper((prev) => {
+            const g = levelGesture.current;
+            if (g == null) return next;
+            const levels: [number, number] = [...(next.levels ?? prev.levels)];
+            levels[g] = prev.levels[g] ?? levels[g];
+            return { ...next, levels };
+          });
         });
       } catch {
         /* not in Tauri */
@@ -577,6 +633,7 @@ export default function Home() {
         </div>
       </section>
 
+      <div className="grid items-start gap-x-8 gap-y-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <section>
         <Silk className="mb-2">Arp</Silk>
         <div className="flex flex-wrap items-center gap-3">
@@ -648,6 +705,154 @@ export default function Home() {
         </div>
       </section>
 
+      <section>
+        <Silk className="mb-2">
+          Loop{looper.clock_sync ? " · sync" : ""}
+          {looper.pending ? " · wait" : ""}
+        </Silk>
+        <div className="flex flex-wrap items-center gap-3">
+          <HwToggleGroup
+            label="Track"
+            value={String(looper.selected)}
+            options={[
+              ["0", "1"],
+              ["1", "2"],
+            ]}
+            onChange={(v) => {
+              const track = Number(v);
+              setLooper((prev) => ({ ...prev, selected: track }));
+              invoke("looper_select", { track }).catch(() => undefined);
+            }}
+          />
+          <HwStomp
+            mode={loopMode(looper.modes[looper.selected] ?? 0)}
+            on={looper.modes[looper.selected] === 1 || looper.modes[looper.selected] === 3}
+            onClick={() => invoke("looper_rec_play").catch(() => undefined)}
+            midi={midiFor("looper_rec_play")}
+          >
+            {loopRecLabel(looper.modes[looper.selected] ?? 0)}
+          </HwStomp>
+          <HwStomp
+            onClick={() => invoke("looper_stop").catch(() => undefined)}
+            midi={midiFor("looper_stop")}
+          >
+            Stop
+          </HwStomp>
+          <HwStomp
+            onClick={() => invoke("looper_undo").catch(() => undefined)}
+            midi={midiFor("looper_undo")}
+          >
+            Undo
+          </HwStomp>
+          <HwButton
+            disabled={(looper.modes[looper.selected] ?? 0) !== 4 && (looper.modes[looper.selected] ?? 0) !== 0}
+            onClick={() => invoke("looper_clear").catch(() => undefined)}
+          >
+            Clear
+          </HwButton>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <HwToggle
+            on={looper.muted[0]}
+            onClick={() => {
+              const on = !looper.muted[0];
+              setLooper((prev) => ({ ...prev, muted: [on, prev.muted[1]] }));
+              invoke("looper_mute", { track: 0, on }).catch(() => undefined);
+            }}
+          >
+            Mute 1
+          </HwToggle>
+          <HwToggle
+            on={looper.muted[1]}
+            onClick={() => {
+              const on = !looper.muted[1];
+              setLooper((prev) => ({ ...prev, muted: [prev.muted[0], on] }));
+              invoke("looper_mute", { track: 1, on }).catch(() => undefined);
+            }}
+          >
+            Mute 2
+          </HwToggle>
+          <HwStomp
+            on={looper.muted[looper.selected] ?? false}
+            onClick={() => {
+              const track = looper.selected;
+              const on = !looper.muted[track];
+              setLooper((prev) => {
+                const muted: [boolean, boolean] = [...prev.muted];
+                muted[track] = on;
+                return { ...prev, muted };
+              });
+              invoke("looper_mute", { track, on }).catch(() => undefined);
+            }}
+            midi={midiFor("looper_mute")}
+          >
+            Mute
+          </HwStomp>
+          <HwToggleGroup
+            label="T2"
+            value={String(looper.mult)}
+            options={[
+              ["1", "1×"],
+              ["2", "2×"],
+              ["4", "4×"],
+            ]}
+            disabledIds={[
+              ...(looper.max_mult < 2 ? ["2"] : []),
+              ...(looper.max_mult < 4 ? ["4"] : []),
+            ]}
+            onChange={(v) => {
+              const mult = Number(v);
+              setLooper((prev) => ({ ...prev, mult }));
+              invoke("looper_mult", { mult }).catch(() => undefined);
+            }}
+          />
+        </div>
+        <div className="hw-knobs">
+          <HwKnob
+            label="Lvl 1"
+            display={`${Math.round((looper.levels[0] ?? 1) * 100)}`}
+            value={looper.levels[0] ?? 1}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => {
+              setLooper((prev) => ({ ...prev, levels: [v, prev.levels[1] ?? 1] }));
+              invoke("looper_level", { track: 0, value: v }).catch(() => undefined);
+            }}
+            onGestureChange={(on) => {
+              levelGesture.current = on ? 0 : null;
+            }}
+            midi={midiFor("looper_level_1")}
+          />
+          <HwKnob
+            label="Lvl 2"
+            display={`${Math.round((looper.levels[1] ?? 1) * 100)}`}
+            value={looper.levels[1] ?? 1}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => {
+              setLooper((prev) => ({ ...prev, levels: [prev.levels[0] ?? 1, v] }));
+              invoke("looper_level", { track: 1, value: v }).catch(() => undefined);
+            }}
+            onGestureChange={(on) => {
+              levelGesture.current = on ? 1 : null;
+            }}
+            midi={midiFor("looper_level_2")}
+          />
+        </div>
+        <div
+          className="loop-playhead"
+          data-rec={looper.modes[looper.selected] === 1 ? "true" : undefined}
+          data-pending={looper.pending ? "true" : undefined}
+          style={{ "--pos": String(looper.playhead) } as CSSProperties}
+          aria-label="Loop playhead"
+        >
+          <i />
+        </div>
+      </section>
+      </div>
+
       {configOpen && (
         <ConfigModal
           status={status}
@@ -660,12 +865,37 @@ export default function Home() {
   );
 }
 
+function loopMode(mode: number): "rec" | "play" | "dub" | undefined {
+  if (mode === 1) return "rec";
+  if (mode === 2) return "play";
+  if (mode === 3) return "dub";
+  return undefined;
+}
+
+function loopRecLabel(mode: number) {
+  if (mode === 1) return "Rec";
+  if (mode === 2) return "Play";
+  if (mode === 3) return "Dub";
+  if (mode === 4) return "Play";
+  return "Rec";
+}
+
 function unique(values: string[]) {
   return [...new Set(values)];
 }
 
 function folderLabel(category: string) {
   return category || "Root";
+}
+
+function splitCategory(category: string) {
+  const parts = category.split("/").filter(Boolean);
+  if (parts.length <= 1) return { pack: "", leaf: folderLabel(category) };
+  return { pack: parts[0], leaf: parts.slice(1).join("/") };
+}
+
+function packKey(bank: string, pack: string) {
+  return `${bank}::${pack}`;
 }
 
 function PatchBar({
@@ -683,6 +913,7 @@ function PatchBar({
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [openPacks, setOpenPacks] = useState<Set<string>>(() => new Set());
   const rootRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
@@ -714,13 +945,64 @@ function PatchBar({
     const banks = order
       .filter((b) => found.includes(b))
       .concat(found.filter((b) => !order.includes(b)));
-    return banks.map((b) => ({
-      bank: b,
-      categories: unique(
+    return banks.map((b) => {
+      const categories = unique(
         presets.filter((p) => p.bank === b).map((p) => p.category),
-      ).sort((a, c) => folderLabel(a).localeCompare(folderLabel(c))),
-    }));
+      ).sort((a, c) => folderLabel(a).localeCompare(folderLabel(c)));
+      const roots: { category: string; leaf: string }[] = [];
+      const packMap = new Map<string, { category: string; leaf: string }[]>();
+      for (const cat of categories) {
+        const { pack, leaf } = splitCategory(cat);
+        const item = { category: cat, leaf };
+        if (!pack) {
+          roots.push(item);
+          continue;
+        }
+        const list = packMap.get(pack) ?? [];
+        list.push(item);
+        packMap.set(pack, list);
+      }
+      const packs = [...packMap.entries()]
+        .sort(([a], [c]) => a.localeCompare(c))
+        .map(([name, types]) => ({ name, types }));
+      return { bank: b, roots, packs };
+    });
   }, [presets]);
+
+  useEffect(() => {
+    const { pack } = splitCategory(category);
+    if (!pack) return;
+    const key = packKey(bank, pack);
+    setOpenPacks((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, [bank, category]);
+
+  const selectCategory = (nextBank: string, nextCategory: string) => {
+    setBank(nextBank);
+    setCategory(nextCategory);
+    setQuery("");
+  };
+
+  const togglePack = (
+    bankName: string,
+    pack: { name: string; types: { category: string; leaf: string }[] },
+  ) => {
+    if (pack.types.length === 1) {
+      selectCategory(bankName, pack.types[0].category);
+      return;
+    }
+    const key = packKey(bankName, pack.name);
+    setOpenPacks((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -809,27 +1091,77 @@ function PatchBar({
             {tree.map((group) => (
               <li key={group.bank}>
                 <p className="patch-tree-bank">{group.bank}</p>
-                {group.categories.map((cat) => (
-                  <button
-                    key={`${group.bank}/${cat}`}
-                    type="button"
-                    className="patch-item"
-                    data-on={
-                      !query && bank === group.bank && category === cat ? "true" : undefined
-                    }
-                    onClick={() => {
-                      setBank(group.bank);
-                      setCategory(cat);
-                      setQuery("");
-                    }}
-                  >
-                    {folderLabel(cat)}
-                  </button>
-                ))}
+                {group.roots.length > 0 && (
+                  <div className="patch-tree-types">
+                    {group.roots.map((t) => (
+                      <button
+                        key={`${group.bank}/${t.category}`}
+                        type="button"
+                        className="patch-chip"
+                        data-on={
+                          !query && bank === group.bank && category === t.category
+                            ? "true"
+                            : undefined
+                        }
+                        onClick={() => selectCategory(group.bank, t.category)}
+                      >
+                        {t.leaf}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {group.packs.map((pack) => {
+                  const key = packKey(group.bank, pack.name);
+                  const expanded = pack.types.length > 1 && openPacks.has(key);
+                  const packOn =
+                    !query &&
+                    bank === group.bank &&
+                    splitCategory(category).pack === pack.name;
+                  return (
+                    <div key={key} className="patch-tree-pack">
+                      <button
+                        type="button"
+                        className="patch-tree-pack-btn"
+                        data-on={packOn && pack.types.length === 1 ? "true" : undefined}
+                        data-active={packOn ? "true" : undefined}
+                        data-open={expanded ? "true" : undefined}
+                        onClick={() => togglePack(group.bank, pack)}
+                      >
+                        {pack.types.length > 1 && (
+                          <span className="patch-tree-chevron" aria-hidden="true">
+                            {expanded ? "▾" : "▸"}
+                          </span>
+                        )}
+                        {pack.name}
+                      </button>
+                      {expanded && (
+                        <div className="patch-tree-types">
+                          {pack.types.map((t) => (
+                            <button
+                              key={t.category}
+                              type="button"
+                              className="patch-chip"
+                              data-on={
+                                !query &&
+                                bank === group.bank &&
+                                category === t.category
+                                  ? "true"
+                                  : undefined
+                              }
+                              onClick={() => selectCategory(group.bank, t.category)}
+                            >
+                              {t.leaf}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </li>
             ))}
           </ul>
-          <ul className="patch-list">
+          <ul className="patch-list" data-search={query.trim() ? "true" : undefined}>
             {filtered.length === 0 ? (
               <li className="px-2 py-2 text-xs text-[var(--muted)]">
                 {!supported

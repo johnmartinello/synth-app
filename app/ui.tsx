@@ -195,6 +195,81 @@ export type HwKnobMidi = {
   onClear: () => void;
 };
 
+function midiChipLabel(midi: HwKnobMidi) {
+  if (midi.learning) return "Learn";
+  if (midi.cc != null) return `CC${midi.cc}`;
+  return "MIDI";
+}
+
+export function HwMidiChip({
+  midi,
+  label,
+}: {
+  midi: HwKnobMidi;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="hw-midi-chip"
+      data-on={midi.learning ? "true" : undefined}
+      data-mapped={midi.cc != null && !midi.learning ? "true" : undefined}
+      aria-label={
+        midi.learning
+          ? `Cancel MIDI learn for ${label ?? midi.paramId}`
+          : midi.cc != null
+            ? `${label ?? midi.paramId} mapped to CC ${midi.cc}. Click to relearn, right-click to clear.`
+            : `MIDI learn ${label ?? midi.paramId}`
+      }
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        midi.onLearn();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        midi.onClear();
+      }}
+    >
+      {midiChipLabel(midi)}
+    </button>
+  );
+}
+
+export function HwStomp({
+  children,
+  on,
+  mode,
+  disabled,
+  onClick,
+  midi,
+  className = "",
+}: {
+  children: ReactNode;
+  on?: boolean;
+  mode?: "rec" | "play" | "dub";
+  disabled?: boolean;
+  onClick: () => void;
+  midi?: HwKnobMidi;
+  className?: string;
+}) {
+  return (
+    <div className="hw-stomp">
+      <HwButton
+        on={on}
+        disabled={disabled}
+        onClick={onClick}
+        className={className}
+        data-mode={mode}
+      >
+        {children}
+      </HwButton>
+      {midi ? <HwMidiChip midi={midi} /> : null}
+    </div>
+  );
+}
+
 type HwKnobProps = {
   label?: string;
   display?: string;
@@ -230,14 +305,6 @@ export function HwKnob({
     const snapped = snap(next, min, max, step);
     if (snapped !== value) onChange(snapped);
   };
-
-  const midiLabel = midi
-    ? midi.learning
-      ? "Learn"
-      : midi.cc != null
-        ? `CC${midi.cc}`
-        : "MIDI"
-    : null;
 
   return (
     <div className="hw-knob" data-disabled={disabled ? "true" : undefined}>
@@ -308,33 +375,7 @@ export function HwKnob({
         >
           <i className="hw-knob-tick" style={{ "--angle": `${angle}deg` } as CSSProperties} />
         </div>
-        {midi ? (
-          <button
-            type="button"
-            className="hw-midi-chip"
-            data-on={midi.learning ? "true" : undefined}
-            data-mapped={midi.cc != null && !midi.learning ? "true" : undefined}
-            aria-label={
-              midi.learning
-                ? `Cancel MIDI learn for ${label ?? midi.paramId}`
-                : midi.cc != null
-                  ? `${label ?? midi.paramId} mapped to CC ${midi.cc}. Click to relearn, right-click to clear.`
-                  : `MIDI learn ${label ?? midi.paramId}`
-            }
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              midi.onLearn();
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              midi.onClear();
-            }}
-          >
-            {midiLabel}
-          </button>
-        ) : null}
+        {midi ? <HwMidiChip midi={midi} label={label} /> : null}
       </div>
       <span className="hw-knob-value">{display ?? String(value)}</span>
     </div>

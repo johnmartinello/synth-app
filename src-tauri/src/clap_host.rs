@@ -10,6 +10,7 @@ use crate::engine::{
     ScaleKind, Secondary, MAX_CHORD_NOTES,
 };
 use crate::envelope::EnvelopeParams;
+use crate::looper::{LooperEvent, LooperStatus};
 use crate::midi::{self, MidiBytes, MidiPadState};
 use crate::midi_learn::{self, LearnableParam, MidiLearnMap, MidiLearnState};
 use clack_extensions::audio_ports::{AudioPortRescanFlags, HostAudioPortsImpl};
@@ -282,6 +283,24 @@ pub enum HostCommand {
     MidiUnmap {
         param: LearnableParam,
     },
+    LooperRecPlay,
+    LooperStop,
+    LooperUndo,
+    LooperClear,
+    LooperSelect {
+        track: u8,
+    },
+    LooperMute {
+        track: u8,
+        on: bool,
+    },
+    LooperLevel {
+        track: u8,
+        value: f32,
+    },
+    LooperMult {
+        mult: u8,
+    },
     IncomingMidi(MidiBytes),
     Shutdown,
 }
@@ -308,6 +327,8 @@ pub struct HostStatus {
     pub midi_learn: Option<String>,
     pub midi_maps: HashMap<String, u8>,
     pub envelope: EnvelopeParams,
+    #[serde(default)]
+    pub looper: LooperStatus,
 }
 
 #[derive(Clone, Serialize)]
@@ -331,6 +352,25 @@ struct EnvUi {
 #[derive(Clone, Serialize)]
 struct PadsUi {
     held: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct LooperSettings {
+    selected: u8,
+    muted: [bool; 2],
+    levels: [f32; 2],
+    mult: u8,
+}
+
+impl Default for LooperSettings {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            muted: [false, false],
+            levels: [1.0, 1.0],
+            mult: 1,
+        }
+    }
 }
 
 struct GuiPump {
@@ -417,6 +457,40 @@ fn emit_env_ui(app: &AppHandle, last: &mut u32) {
     }
     *last = packed;
     let _ = app.emit("env-ui", EnvUi { stage, progress, level });
+}
+
+fn emit_looper_ui(app: &AppHandle, last: &mut u64, status: &mut HostStatus) {
+    let snap = crate::audio::looper_snapshot();
+    let q = ((snap.playhead.clamp(0.0, 1.0) * 1023.0).round() as u64) & 1023;
+    let packed = q
+        | ((u64::from(snap.selected) & 3) << 10)
+        | ((u64::from(snap.modes[0]) & 7) << 12)
+        | ((u64::from(snap.modes[1]) & 7) << 15)
+        | (u64::from(snap.muted[0]) << 18)
+        | (u64::from(snap.muted[1]) << 19)
+        | (u64::from(snap.has_phrase[0]) << 20)
+        | (u64::from(snap.has_phrase[1]) << 21)
+        | ((u64::from(snap.mult) & 7) << 22)
+        | (u64::from(snap.pending) << 25)
+        | (((snap.levels[0].clamp(0.0, 1.0) * 127.0).round() as u64) << 26)
+        | (((snap.levels[1].clamp(0.0, 1.0) * 127.0).round() as u64) << 33);
+    if packed == *last {
+        return;
+    }
+    *last = packed;
+    status.looper = snap.clone();
+    let _ = app.emit("looper-ui", snap);
+}
+
+fn push_looper(prod: &mut Producer<EngineEvent>, ev: LooperEvent) {
+    push_engine(prod, EngineEvent::Looper(ev));
+}
+
+fn copy_looper_controls(status: &mut HostStatus, settings: &LooperSettings) {
+    status.looper.selected = settings.selected;
+    status.looper.muted = settings.muted;
+    status.looper.levels = settings.levels;
+    status.looper.mult = settings.mult;
 }
 
 fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
@@ -674,6 +748,7 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         midi_learn: None,
         midi_maps: MidiLearnMap::defaults().to_status_maps(),
         envelope: EnvelopeParams::default(),
+        looper: LooperStatus::default(),
     };
     emit_status(&app, &status);
 
@@ -764,6 +839,9 @@ fn run_with_plugin(
     emit_status(&app, status);
     let mut last_notes = [0u64; 2];
     let mut last_env = u32::MAX;
+    let mut last_looper = u64::MAX;
+    let mut looper = LooperSettings::default();
+    copy_looper_controls(status, &looper);
 
     loop {
         while let Ok(bytes) = midi_bytes_rx.try_recv() {
@@ -776,6 +854,7 @@ fn run_with_plugin(
                 &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
+                &mut looper,
                 status,
                 Some(&app),
             );
@@ -819,6 +898,7 @@ fn run_with_plugin(
                 &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
+                &mut looper,
                 status,
             );
         }
@@ -842,6 +922,7 @@ fn run_with_plugin(
                 &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
+                &mut looper,
                 status,
             );
         }
@@ -905,6 +986,7 @@ fn run_with_plugin(
 
         emit_notes_ui(&app, &mut last_notes);
         emit_env_ui(&app, &mut last_env);
+        emit_looper_ui(&app, &mut last_looper, status);
     }
 
     if let Some(g) = gui.as_mut() {
@@ -922,6 +1004,7 @@ fn handle_incoming_midi(
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
+    looper: &mut LooperSettings,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
@@ -1014,6 +1097,7 @@ fn handle_incoming_midi(
                 learn,
                 prod,
                 midi_clock,
+                looper,
                 status,
                 app,
             );
@@ -1030,6 +1114,7 @@ fn handle_learnable_cc(
     learn: &mut MidiLearnState,
     prod: &mut Producer<EngineEvent>,
     midi_clock: &MidiClock,
+    looper: &mut LooperSettings,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
@@ -1053,9 +1138,35 @@ fn handle_learnable_cc(
         envelope,
         prod,
         midi_clock,
+        looper,
+        learn,
         status,
         app,
     );
+}
+
+fn fire_looper_trigger(
+    param: LearnableParam,
+    looper: &mut LooperSettings,
+    prod: &mut Producer<EngineEvent>,
+) {
+    match param {
+        LearnableParam::LooperRecPlay => push_looper(prod, LooperEvent::TapRecPlay),
+        LearnableParam::LooperStop => push_looper(prod, LooperEvent::Stop),
+        LearnableParam::LooperUndo => push_looper(prod, LooperEvent::Undo),
+        LearnableParam::LooperMute => {
+            let i = looper.selected.min(1) as usize;
+            looper.muted[i] = !looper.muted[i];
+            push_looper(
+                prod,
+                LooperEvent::SetMute {
+                    track: looper.selected,
+                    on: looper.muted[i],
+                },
+            );
+        }
+        _ => {}
+    }
 }
 
 fn apply_learned_param(
@@ -1065,9 +1176,24 @@ fn apply_learned_param(
     envelope: &mut EnvelopeParams,
     prod: &mut Producer<EngineEvent>,
     midi_clock: &MidiClock,
+    looper: &mut LooperSettings,
+    learn: &mut MidiLearnState,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
+    if param.is_trigger() {
+        let high = val >= 64;
+        let was = learn.trigger_high.insert(param, high).unwrap_or(false);
+        if high && !was {
+            fire_looper_trigger(param, looper, prod);
+            copy_looper_controls(status, looper);
+        }
+        copy_controls(status, settings, midi_clock.live);
+        if let Some(app) = app {
+            emit_status(app, status);
+        }
+        return;
+    }
     let value = midi_learn::cc_to_value(param, val);
     match param {
         LearnableParam::ArpRate => {
@@ -1092,6 +1218,26 @@ fn apply_learned_param(
         LearnableParam::EnvDecay => envelope.decay = value,
         LearnableParam::EnvSustain => envelope.sustain = value,
         LearnableParam::EnvRelease => envelope.release = value,
+        LearnableParam::LooperLevel1 | LearnableParam::LooperLevel2 => {
+            let track = if param == LearnableParam::LooperLevel2 {
+                1
+            } else {
+                0
+            };
+            looper.levels[track] = value.clamp(0.0, 1.0);
+            push_looper(
+                prod,
+                LooperEvent::SetLevel {
+                    track: track as u8,
+                    norm: looper.levels[track],
+                },
+            );
+            copy_looper_controls(status, looper);
+        }
+        LearnableParam::LooperRecPlay
+        | LearnableParam::LooperStop
+        | LearnableParam::LooperUndo
+        | LearnableParam::LooperMute => {}
     }
     if param.is_envelope() {
         *envelope = envelope.sanitized();
@@ -1215,6 +1361,7 @@ fn handle_command(
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
+    looper: &mut LooperSettings,
     status: &mut HostStatus,
 ) {
     match cmd {
@@ -1229,6 +1376,7 @@ fn handle_command(
                 midi_pads,
                 held_pads,
                 midi_clock,
+                looper,
                 status,
                 Some(app),
             );
@@ -1470,6 +1618,58 @@ fn handle_command(
                 Err(e) => status.message = Some(format!("Patch: {e}")),
             }
             emit_status(app, status);
+        }
+        HostCommand::LooperRecPlay => {
+            push_looper(prod, LooperEvent::TapRecPlay);
+        }
+        HostCommand::LooperStop => {
+            push_looper(prod, LooperEvent::Stop);
+        }
+        HostCommand::LooperUndo => {
+            push_looper(prod, LooperEvent::Undo);
+        }
+        HostCommand::LooperClear => {
+            push_looper(prod, LooperEvent::Clear);
+        }
+        HostCommand::LooperSelect { track } => {
+            looper.selected = track.min(1);
+            push_looper(prod, LooperEvent::SelectTrack { track: looper.selected });
+            copy_looper_controls(status, looper);
+            emit_status(app, status);
+        }
+        HostCommand::LooperMute { track, on } => {
+            let i = track.min(1) as usize;
+            looper.muted[i] = on;
+            push_looper(
+                prod,
+                LooperEvent::SetMute {
+                    track: track.min(1),
+                    on,
+                },
+            );
+            copy_looper_controls(status, looper);
+            emit_status(app, status);
+        }
+        HostCommand::LooperLevel { track, value } => {
+            let i = track.min(1) as usize;
+            looper.levels[i] = value.clamp(0.0, 1.0);
+            push_looper(
+                prod,
+                LooperEvent::SetLevel {
+                    track: track.min(1),
+                    norm: looper.levels[i],
+                },
+            );
+            copy_looper_controls(status, looper);
+            emit_status(app, status);
+        }
+        HostCommand::LooperMult { mult } => {
+            if matches!(mult, 1 | 2 | 4) {
+                looper.mult = mult;
+                push_looper(prod, LooperEvent::SetMult { mult });
+                copy_looper_controls(status, looper);
+                emit_status(app, status);
+            }
         }
     }
 }
