@@ -202,7 +202,7 @@ function parseTyped(raw: string): number | null {
 
 export type HwKnobMidi = {
   paramId: string;
-  cc?: number;
+  mapped?: string;
   learning: boolean;
   onLearn: () => void;
   onClear: () => void;
@@ -210,7 +210,7 @@ export type HwKnobMidi = {
 
 function midiChipLabel(midi: HwKnobMidi) {
   if (midi.learning) return "Learn";
-  if (midi.cc != null) return `CC${midi.cc}`;
+  if (midi.mapped) return midi.mapped;
   return "MIDI";
 }
 
@@ -226,12 +226,12 @@ export function HwMidiChip({
       type="button"
       className="hw-midi-chip"
       data-on={midi.learning ? "true" : undefined}
-      data-mapped={midi.cc != null && !midi.learning ? "true" : undefined}
+      data-mapped={midi.mapped && !midi.learning ? "true" : undefined}
       aria-label={
         midi.learning
           ? `Cancel MIDI learn for ${label ?? midi.paramId}`
-          : midi.cc != null
-            ? `${label ?? midi.paramId} mapped to CC ${midi.cc}. Click to relearn, right-click to clear.`
+          : midi.mapped
+            ? `${label ?? midi.paramId} mapped to ${midi.mapped}. Click to relearn, right-click to clear.`
             : `MIDI learn ${label ?? midi.paramId}`
       }
       onClick={(e) => {

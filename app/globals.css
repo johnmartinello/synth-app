@@ -363,7 +363,7 @@ input {
   text-transform: uppercase;
   line-height: 1;
   cursor: pointer;
-  min-width: 2.15rem;
+  min-width: 2.4rem;
 }
 
 .hw-midi-chip:hover {

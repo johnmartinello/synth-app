@@ -17,11 +17,45 @@ use crate::clap_host::CpalHost;
 /// Notes that arrive this close together are treated as one physical key (controller chord mode).
 const PAD_CLUSTER: Duration = Duration::from_millis(30);
 
-/// Packed MIDI bytes from the midir callback (no SysEx).
+/// Packed MIDI bytes from the midir callback (channel messages + MMC SysEx).
 #[derive(Clone, Copy, Debug)]
 pub struct MidiBytes {
-    pub data: [u8; 3],
+    pub data: [u8; 8],
     pub len: u8,
+}
+
+impl MidiBytes {
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > 8 {
+            return None;
+        }
+        let mut data = [0u8; 8];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            data,
+            len: bytes.len() as u8,
+        })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
+}
+
+/// MIDI Machine Control command from Universal Real-Time SysEx:
+/// `F0 7F <device> 06 <command> … F7` (play=2, stop=1, rec=6).
+pub fn mmc_command(data: &[u8]) -> Option<u8> {
+    if data.len() < 6 {
+        return None;
+    }
+    if data[0] != 0xF0 || data[1] != 0x7F || data[3] != 0x06 {
+        return None;
+    }
+    if data[data.len() - 1] != 0xF7 {
+        return None;
+    }
+    let command = data[4];
+    (command > 0).then_some(command)
 }
 
 #[derive(Clone, Serialize)]
@@ -31,7 +65,7 @@ pub struct MidiPortInfo {
 
 pub fn list_ports() -> Result<Vec<MidiPortInfo>, String> {
     let mut input = MidiInput::new("Surge Chord").map_err(|e| e.to_string())?;
-    input.ignore(Ignore::Sysex | Ignore::ActiveSense);
+    input.ignore(Ignore::ActiveSense);
     let mut out = Vec::new();
     for port in input.ports() {
         if let Ok(name) = input.port_name(&port) {
@@ -48,10 +82,12 @@ pub fn expand_running_status(last_status: &mut u8, data: &[u8]) -> Option<MidiBy
     }
     let first = data[0];
     if first >= 0xF8 {
-        return Some(MidiBytes {
-            data: [first, 0, 0],
-            len: 1,
-        });
+        return MidiBytes::from_slice(&[first]);
+    }
+    if first == 0xF0 {
+        *last_status = 0;
+        let command = mmc_command(data)?;
+        return MidiBytes::from_slice(&[0xF0, 0x7F, 0x7F, 0x06, command, 0xF7]);
     }
     let (status, payload) = if first < 0x80 {
         if *last_status < 0x80 {
@@ -63,22 +99,19 @@ pub fn expand_running_status(last_status: &mut u8, data: &[u8]) -> Option<MidiBy
         (first, &data[1..])
     } else {
         *last_status = 0;
-        (first, &data[1..])
+        return None;
     };
     let need = match status & 0xF0 {
         0xC0 | 0xD0 => 1,
-        0xF0 => return None,
         _ => 2,
     };
     if payload.len() < need {
         return None;
     }
-    let mut packed = MidiBytes {
-        data: [status, 0, 0],
-        len: (1 + need) as u8,
-    };
-    packed.data[1..1 + need].copy_from_slice(&payload[..need]);
-    Some(packed)
+    let mut packed = [0u8; 8];
+    packed[0] = status;
+    packed[1..1 + need].copy_from_slice(&payload[..need]);
+    MidiBytes::from_slice(&packed[..1 + need])
 }
 
 /// Open a named MIDI input and forward bytes to the CLAP host thread (not the webview).
@@ -87,7 +120,7 @@ pub fn connect_port(
     tx: Sender<MidiBytes>,
 ) -> Result<MidiInputConnection<u8>, Box<dyn Error>> {
     let mut input = MidiInput::new("Surge Chord")?;
-    input.ignore(Ignore::Sysex | Ignore::ActiveSense);
+    input.ignore(Ignore::ActiveSense);
     let ports = input.ports();
     let selected = ports
         .iter()
@@ -280,5 +313,26 @@ mod tests {
         assert_eq!(pads.note_on(67, 5), Some(5));
         assert_eq!(pads.note_off(67), Some(5));
         assert_eq!(pads.note_off(60), Some(1));
+    }
+
+    #[test]
+    fn mmc_play_stop_rec() {
+        assert_eq!(
+            mmc_command(&[0xF0, 0x7F, 0x7F, 0x06, 0x02, 0xF7]),
+            Some(2)
+        );
+        assert_eq!(
+            mmc_command(&[0xF0, 0x7F, 0x00, 0x06, 0x01, 0xF7]),
+            Some(1)
+        );
+        assert_eq!(
+            mmc_command(&[0xF0, 0x7F, 0x7F, 0x06, 0x06, 0xF7]),
+            Some(6)
+        );
+        assert_eq!(mmc_command(&[0xF0, 0x7E, 0x7F, 0x06, 0x02, 0xF7]), None);
+        let mut last = 0u8;
+        let play = expand_running_status(&mut last, &[0xF0, 0x7F, 0x7F, 0x06, 0x02, 0xF7]).unwrap();
+        assert_eq!(mmc_command(play.as_slice()), Some(2));
+        assert!(expand_running_status(&mut last, &[0xF0, 0x01, 0x02, 0xF7]).is_none());
     }
 }

@@ -1,4 +1,4 @@
-//! Assignable MIDI CC → host knob mappings (MIDI learn).
+//! Assignable MIDI sources → host knob/button mappings (MIDI learn).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,8 +102,78 @@ impl LearnableParam {
     }
 }
 
+/// A MIDI event that can be bound by learn: CC, note, transport realtime, or MMC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MidiSource {
+    Cc { n: u8 },
+    Note { n: u8 },
+    /// MIDI realtime: `0xFA` start, `0xFB` continue, `0xFC` stop.
+    Realtime { status: u8 },
+    /// MIDI Machine Control command byte (`01` stop, `02` play, `06` rec).
+    Mmc { command: u8 },
+}
+
+impl MidiSource {
+    pub fn cc(n: u8) -> Self {
+        Self::Cc { n }
+    }
+
+    pub fn note(n: u8) -> Self {
+        Self::Note { n }
+    }
+
+    pub fn realtime(status: u8) -> Self {
+        Self::Realtime { status }
+    }
+
+    pub fn mmc(command: u8) -> Self {
+        Self::Mmc { command }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Cc { n } => format!("CC{n}"),
+            Self::Note { n } => format!("N{n}"),
+            Self::Realtime { status: 0xFA } => "Start".into(),
+            Self::Realtime { status: 0xFB } => "Cont".into(),
+            Self::Realtime { status: 0xFC } => "Stop".into(),
+            Self::Realtime { status } => format!("RT{status:02X}"),
+            Self::Mmc { command: 1 } => "Stop".into(),
+            Self::Mmc { command: 2 | 3 } => "Play".into(),
+            Self::Mmc { command: 6 | 7 | 8 } => "Rec".into(),
+            Self::Mmc { command } => format!("MMC{command}"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredBinding {
+    LegacyCc(u8),
+    Source(MidiSource),
+}
+
 pub fn is_reserved_cc(cc: u8) -> bool {
     RESERVED_CCS.contains(&cc)
+}
+
+pub fn is_learnable_realtime(status: u8) -> bool {
+    matches!(status, 0xFA | 0xFB | 0xFC)
+}
+
+fn source_bindable(param: LearnableParam, source: MidiSource) -> bool {
+    match source {
+        MidiSource::Cc { n } => {
+            if n == 102 && param.is_trigger() {
+                return true;
+            }
+            !is_reserved_cc(n)
+        }
+        MidiSource::Note { .. } => param.is_trigger(),
+        MidiSource::Realtime { status } => param.is_trigger() && is_learnable_realtime(status),
+        MidiSource::Mmc { command } => param.is_trigger() && command > 0,
+    }
 }
 
 pub fn file_path(app: &AppHandle) -> Option<PathBuf> {
@@ -145,14 +215,14 @@ pub fn norm_to_time(n: f32) -> f32 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MidiLearnMap {
-    bindings: HashMap<LearnableParam, u8>,
+    bindings: HashMap<LearnableParam, MidiSource>,
 }
 
 impl MidiLearnMap {
     pub fn defaults() -> Self {
         let mut bindings = HashMap::new();
-        bindings.insert(LearnableParam::ArpRate, DEFAULT_CC_RATE);
-        bindings.insert(LearnableParam::Filter, DEFAULT_CC_FILTER);
+        bindings.insert(LearnableParam::ArpRate, MidiSource::cc(DEFAULT_CC_RATE));
+        bindings.insert(LearnableParam::Filter, MidiSource::cc(DEFAULT_CC_FILTER));
         Self { bindings }
     }
 
@@ -174,14 +244,19 @@ impl MidiLearnMap {
         let Ok(bytes) = fs::read(path) else {
             return Self::defaults();
         };
-        let Ok(raw) = serde_json::from_slice::<HashMap<String, u8>>(&bytes) else {
+        let Ok(raw) = serde_json::from_slice::<HashMap<String, StoredBinding>>(&bytes) else {
             return Self::defaults();
         };
         let mut map = Self::empty();
-        for (id, cc) in raw {
-            if let Some(param) = LearnableParam::from_id(&id) {
-                map.bind(param, cc);
-            }
+        for (id, stored) in raw {
+            let Some(param) = LearnableParam::from_id(&id) else {
+                continue;
+            };
+            let source = match stored {
+                StoredBinding::LegacyCc(n) => MidiSource::cc(n),
+                StoredBinding::Source(source) => source,
+            };
+            map.bind(param, source);
         }
         map
     }
@@ -190,23 +265,23 @@ impl MidiLearnMap {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let raw: HashMap<&str, u8> = self
+        let raw: HashMap<&str, MidiSource> = self
             .bindings
             .iter()
-            .map(|(param, cc)| (param.as_id(), *cc))
+            .map(|(param, source)| (param.as_id(), *source))
             .collect();
         if let Ok(json) = serde_json::to_vec_pretty(&raw) {
             let _ = fs::write(path, json);
         }
     }
 
-    /// Bind `cc` to `param`, stealing it from any other knob. Reserved CCs are rejected.
-    pub fn bind(&mut self, param: LearnableParam, cc: u8) -> bool {
-        if is_reserved_cc(cc) {
+    /// Bind `source` to `param`, stealing it from any other control.
+    pub fn bind(&mut self, param: LearnableParam, source: MidiSource) -> bool {
+        if !source_bindable(param, source) {
             return false;
         }
-        self.bindings.retain(|_, mapped| *mapped != cc);
-        self.bindings.insert(param, cc);
+        self.bindings.retain(|_, mapped| *mapped != source);
+        self.bindings.insert(param, source);
         true
     }
 
@@ -216,19 +291,22 @@ impl MidiLearnMap {
 
     #[allow(dead_code)]
     pub fn cc_for(&self, param: LearnableParam) -> Option<u8> {
-        self.bindings.get(&param).copied()
+        match self.bindings.get(&param).copied()? {
+            MidiSource::Cc { n } => Some(n),
+            _ => None,
+        }
     }
 
-    pub fn param_for_cc(&self, cc: u8) -> Option<LearnableParam> {
+    pub fn param_for(&self, source: MidiSource) -> Option<LearnableParam> {
         self.bindings
             .iter()
-            .find_map(|(param, mapped)| (*mapped == cc).then_some(*param))
+            .find_map(|(param, mapped)| (*mapped == source).then_some(*param))
     }
 
-    pub fn to_status_maps(&self) -> HashMap<String, u8> {
+    pub fn to_status_maps(&self) -> HashMap<String, String> {
         self.bindings
             .iter()
-            .map(|(param, cc)| (param.as_id().to_string(), *cc))
+            .map(|(param, source)| (param.as_id().to_string(), source.label()))
             .collect()
     }
 }
@@ -238,7 +316,6 @@ pub struct MidiLearnState {
     pub map: MidiLearnMap,
     pub armed: Option<LearnableParam>,
     armed_at: Option<Instant>,
-    pub trigger_high: HashMap<LearnableParam, bool>,
 }
 
 impl MidiLearnState {
@@ -247,7 +324,6 @@ impl MidiLearnState {
             map,
             armed: None,
             armed_at: None,
-            trigger_high: HashMap::new(),
         }
     }
 
@@ -277,10 +353,10 @@ impl MidiLearnState {
         }
     }
 
-    /// Bind the next non-reserved CC to the armed param. Stays armed on reserved CCs.
-    pub fn try_learn(&mut self, cc: u8) -> Option<LearnableParam> {
+    /// Bind the next eligible source to the armed param. Stays armed on rejects.
+    pub fn try_learn(&mut self, source: MidiSource) -> Option<LearnableParam> {
         let param = self.armed?;
-        if !self.map.bind(param, cc) {
+        if !self.map.bind(param, source) {
             return None;
         }
         self.cancel();
@@ -314,24 +390,36 @@ mod tests {
         let map = MidiLearnMap::defaults();
         assert_eq!(map.cc_for(LearnableParam::ArpRate), Some(18));
         assert_eq!(map.cc_for(LearnableParam::Filter), Some(74));
-        assert_eq!(map.param_for_cc(18), Some(LearnableParam::ArpRate));
-        assert_eq!(map.param_for_cc(74), Some(LearnableParam::Filter));
+        assert_eq!(
+            map.param_for(MidiSource::cc(18)),
+            Some(LearnableParam::ArpRate)
+        );
+        assert_eq!(
+            map.param_for(MidiSource::cc(74)),
+            Some(LearnableParam::Filter)
+        );
     }
 
     #[test]
     fn bind_steals_cc_from_other_param() {
         let mut map = MidiLearnMap::defaults();
-        assert!(map.bind(LearnableParam::Roll, 18));
+        assert!(map.bind(LearnableParam::Roll, MidiSource::cc(18)));
         assert_eq!(map.cc_for(LearnableParam::Roll), Some(18));
         assert_eq!(map.cc_for(LearnableParam::ArpRate), None);
-        assert_eq!(map.param_for_cc(18), Some(LearnableParam::Roll));
+        assert_eq!(
+            map.param_for(MidiSource::cc(18)),
+            Some(LearnableParam::Roll)
+        );
     }
 
     #[test]
     fn bind_rejects_reserved() {
         let mut map = MidiLearnMap::defaults();
         for cc in RESERVED_CCS {
-            assert!(!map.bind(LearnableParam::Filter, *cc), "cc {cc}");
+            assert!(
+                !map.bind(LearnableParam::Filter, MidiSource::cc(*cc)),
+                "cc {cc}"
+            );
         }
         assert_eq!(map.cc_for(LearnableParam::Filter), Some(74));
     }
@@ -341,7 +429,7 @@ mod tests {
         let mut map = MidiLearnMap::defaults();
         map.unmap(LearnableParam::Filter);
         assert_eq!(map.cc_for(LearnableParam::Filter), None);
-        assert_eq!(map.param_for_cc(74), None);
+        assert_eq!(map.param_for(MidiSource::cc(74)), None);
     }
 
     #[test]
@@ -369,7 +457,7 @@ mod tests {
     fn serde_roundtrip() {
         let path = tmp("roundtrip");
         let mut map = MidiLearnMap::defaults();
-        assert!(map.bind(LearnableParam::EnvAttack, 20));
+        assert!(map.bind(LearnableParam::EnvAttack, MidiSource::cc(20)));
         map.unmap(LearnableParam::Filter);
         map.save(&path);
         let loaded = MidiLearnMap::load(&path);
@@ -404,11 +492,83 @@ mod tests {
     fn try_learn_ignores_reserved_and_stays_armed() {
         let mut learn = MidiLearnState::new(MidiLearnMap::defaults());
         learn.arm(LearnableParam::Roll);
-        assert!(learn.try_learn(64).is_none());
+        assert!(learn.try_learn(MidiSource::cc(64)).is_none());
         assert_eq!(learn.armed, Some(LearnableParam::Roll));
-        assert_eq!(learn.try_learn(21), Some(LearnableParam::Roll));
+        assert_eq!(
+            learn.try_learn(MidiSource::cc(21)),
+            Some(LearnableParam::Roll)
+        );
         assert!(learn.armed.is_none());
         assert_eq!(learn.map.cc_for(LearnableParam::Roll), Some(21));
+    }
+
+    #[test]
+    fn trigger_learns_mmc_and_rejects_knob() {
+        let mut learn = MidiLearnState::new(MidiLearnMap::empty());
+        learn.arm(LearnableParam::Filter);
+        assert!(learn.try_learn(MidiSource::mmc(2)).is_none());
+        assert_eq!(learn.armed, Some(LearnableParam::Filter));
+
+        learn.arm(LearnableParam::LooperRecPlay);
+        assert_eq!(
+            learn.try_learn(MidiSource::mmc(6)),
+            Some(LearnableParam::LooperRecPlay)
+        );
+        assert_eq!(
+            learn.map.param_for(MidiSource::mmc(6)),
+            Some(LearnableParam::LooperRecPlay)
+        );
+        assert_eq!(MidiSource::mmc(6).label(), "Rec");
+        assert_eq!(MidiSource::mmc(2).label(), "Play");
+        assert_eq!(MidiSource::mmc(1).label(), "Stop");
+        assert_eq!(MidiSource::realtime(0xFA).label(), "Start");
+    }
+
+    #[test]
+    fn trigger_learns_cc102_and_low_value_cc() {
+        let mut map = MidiLearnMap::empty();
+        assert!(map.bind(LearnableParam::LooperStop, MidiSource::cc(102)));
+        assert!(!map.bind(LearnableParam::Filter, MidiSource::cc(102)));
+        assert!(map.bind(LearnableParam::LooperRecPlay, MidiSource::cc(103)));
+        assert_eq!(
+            map.param_for(MidiSource::cc(103)),
+            Some(LearnableParam::LooperRecPlay)
+        );
+    }
+
+    #[test]
+    fn trigger_learns_note_and_realtime() {
+        let mut learn = MidiLearnState::new(MidiLearnMap::empty());
+        learn.arm(LearnableParam::LooperMute);
+        assert_eq!(
+            learn.try_learn(MidiSource::note(36)),
+            Some(LearnableParam::LooperMute)
+        );
+        learn.arm(LearnableParam::LooperStop);
+        assert_eq!(
+            learn.try_learn(MidiSource::realtime(0xFC)),
+            Some(LearnableParam::LooperStop)
+        );
+        learn.arm(LearnableParam::LooperUndo);
+        assert!(learn.try_learn(MidiSource::realtime(0xF8)).is_none());
+        assert_eq!(learn.armed, Some(LearnableParam::LooperUndo));
+    }
+
+    #[test]
+    fn load_legacy_cc_numbers() {
+        let path = tmp("legacy");
+        fs::write(
+            &path,
+            br#"{"arp_rate":18,"looper_stop":{"kind":"mmc","command":1}}"#,
+        )
+        .unwrap();
+        let map = MidiLearnMap::load(&path);
+        assert_eq!(map.cc_for(LearnableParam::ArpRate), Some(18));
+        assert_eq!(
+            map.param_for(MidiSource::mmc(1)),
+            Some(LearnableParam::LooperStop)
+        );
+        cleanup(&path);
     }
 
     #[test]

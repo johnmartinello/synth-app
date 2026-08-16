@@ -35,7 +35,7 @@ type HostStatus = {
   filter_cutoff?: number;
   roll_ms?: number;
   midi_learn?: string | null;
-  midi_maps?: Record<string, number>;
+  midi_maps?: Record<string, string>;
   envelope?: EnvParams;
   looper?: LooperStatus;
   metronome?: MetronomeStatus;
@@ -418,11 +418,11 @@ export default function Home() {
 
   const midiFor = useCallback(
     (paramId: string): HwKnobMidi => {
-      const cc = status?.midi_maps?.[paramId];
+      const mapped = status?.midi_maps?.[paramId];
       const learning = status?.midi_learn === paramId;
       return {
         paramId,
-        cc,
+        mapped,
         learning,
         onLearn: () => {
           if (learning) {

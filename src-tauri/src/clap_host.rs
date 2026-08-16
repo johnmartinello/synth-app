@@ -16,7 +16,7 @@ use crate::metronome::{
     MetronomeStatus,
 };
 use crate::midi::{self, MidiBytes, MidiPadState};
-use crate::midi_learn::{self, LearnableParam, MidiLearnMap, MidiLearnState};
+use crate::midi_learn::{self, LearnableParam, MidiLearnMap, MidiLearnState, MidiSource};
 use clack_extensions::audio_ports::{AudioPortRescanFlags, HostAudioPortsImpl};
 use clack_extensions::gui::{GuiSize, HostGui, PluginGui};
 use clack_extensions::log::{HostLog, HostLogImpl, LogSeverity};
@@ -337,7 +337,7 @@ pub struct HostStatus {
     pub filter_cutoff: f32,
     pub roll_ms: f32,
     pub midi_learn: Option<String>,
-    pub midi_maps: HashMap<String, u8>,
+    pub midi_maps: HashMap<String, String>,
     pub envelope: EnvelopeParams,
     #[serde(default)]
     pub looper: LooperStatus,
@@ -1141,9 +1141,38 @@ fn handle_incoming_midi(
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
-    let slice = &bytes.data[..bytes.len as usize];
+    let slice = bytes.as_slice();
     if slice.len() == 1 {
+        if midi_learn::is_learnable_realtime(slice[0]) {
+            handle_learned_source(
+                MidiSource::realtime(slice[0]),
+                127,
+                settings,
+                envelope,
+                learn,
+                prod,
+                midi_clock,
+                looper,
+                status,
+                app,
+            );
+        }
         handle_midi_realtime(slice[0], settings, prod, midi_clock, metro, status, app);
+        return;
+    }
+    if let Some(command) = midi::mmc_command(slice) {
+        handle_learned_source(
+            MidiSource::mmc(command),
+            127,
+            settings,
+            envelope,
+            learn,
+            prod,
+            midi_clock,
+            looper,
+            status,
+            app,
+        );
         return;
     }
     let Ok(msg) = MidiMessage::try_from(slice) else {
@@ -1154,7 +1183,24 @@ fn handle_incoming_midi(
             let key = u8::from(note);
             let vel = u8::from(velocity);
             if vel == 0 {
+                if learn.map.param_for(MidiSource::note(key)).is_some() {
+                    return;
+                }
                 handle_midi_note_off(key, settings, prod, midi_pads, held_pads, app);
+                return;
+            }
+            if handle_learned_source(
+                MidiSource::note(key),
+                vel,
+                settings,
+                envelope,
+                learn,
+                prod,
+                midi_clock,
+                looper,
+                status,
+                app,
+            ) {
                 return;
             }
             stop_test_c(prod, status);
@@ -1180,51 +1226,21 @@ fn handle_incoming_midi(
             }
         }
         MidiMessage::NoteOff(_ch, note, _vel) => {
-            handle_midi_note_off(
-                u8::from(note),
-                settings,
-                prod,
-                midi_pads,
-                held_pads,
-                app,
-            );
-        }
-        MidiMessage::ControlChange(_ch, cc, val) if u8::from(cc) == 1 => {
-            handle_mod_touchbar(u8::from(val), settings, prod, app);
+            let key = u8::from(note);
+            if learn.map.param_for(MidiSource::note(key)).is_some() {
+                return;
+            }
+            handle_midi_note_off(key, settings, prod, midi_pads, held_pads, app);
         }
         MidiMessage::ChannelPressure(_ch, pressure) => {
             handle_mod_touchbar(u8::from(pressure), settings, prod, app);
         }
-        MidiMessage::ControlChange(_ch, cc, val) if u8::from(cc) == 64 => {
-            settings.sustain_pedal = u8::from(val) >= 64;
-            sync_sustain(settings, prod, status, app);
-        }
-        MidiMessage::ControlChange(_ch, cc, val) if u8::from(cc) == CC_ARP => {
-            if u8::from(val) < 64 {
-                return;
-            }
-            settings.arp_enabled = !settings.arp_enabled;
-            push_arp(prod, settings);
-            if !settings.arp_enabled && held_pads.is_empty() {
-                push_engine(prod, EngineEvent::ChordOff);
-            }
-            copy_controls(status, settings, midi_clock.live);
-            if let Some(app) = app {
-                emit_status(app, status);
-            }
-        }
-        MidiMessage::ControlChange(_ch, cc, val)
-            if u8::from(cc) == 123 || (u8::from(cc) == 120 && u8::from(val) > 0) =>
-        {
-            held_pads.clear();
-            midi_pads.clear();
-            push_engine(prod, EngineEvent::Panic);
-            emit_pads_ui(app, held_pads);
-        }
         MidiMessage::ControlChange(_ch, cc, val) => {
-            handle_learnable_cc(
-                u8::from(cc),
-                u8::from(val),
+            let cc = u8::from(cc);
+            let val = u8::from(val);
+            if handle_learned_source(
+                MidiSource::cc(cc),
+                val,
                 settings,
                 envelope,
                 learn,
@@ -1233,14 +1249,50 @@ fn handle_incoming_midi(
                 looper,
                 status,
                 app,
-            );
+            ) {
+                return;
+            }
+            match cc {
+                1 => handle_mod_touchbar(val, settings, prod, app),
+                64 => {
+                    settings.sustain_pedal = val >= 64;
+                    sync_sustain(settings, prod, status, app);
+                }
+                CC_ARP => {
+                    if val < 64 {
+                        return;
+                    }
+                    settings.arp_enabled = !settings.arp_enabled;
+                    push_arp(prod, settings);
+                    if !settings.arp_enabled && held_pads.is_empty() {
+                        push_engine(prod, EngineEvent::ChordOff);
+                    }
+                    copy_controls(status, settings, midi_clock.live);
+                    if let Some(app) = app {
+                        emit_status(app, status);
+                    }
+                }
+                123 => {
+                    held_pads.clear();
+                    midi_pads.clear();
+                    push_engine(prod, EngineEvent::Panic);
+                    emit_pads_ui(app, held_pads);
+                }
+                120 if val > 0 => {
+                    held_pads.clear();
+                    midi_pads.clear();
+                    push_engine(prod, EngineEvent::Panic);
+                    emit_pads_ui(app, held_pads);
+                }
+                _ => {}
+            }
         }
         _ => {}
     }
 }
 
-fn handle_learnable_cc(
-    cc: u8,
+fn handle_learned_source(
+    source: MidiSource,
     val: u8,
     settings: &mut EngineSettings,
     envelope: &mut EnvelopeParams,
@@ -1250,19 +1302,19 @@ fn handle_learnable_cc(
     looper: &mut LooperSettings,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
-) {
-    let param = if let Some(param) = learn.try_learn(cc) {
+) -> bool {
+    let param = if let Some(param) = learn.try_learn(source) {
         if let Some(app) = app {
             persist_learn(app, &learn.map);
         }
         copy_learn(status, learn);
         param
     } else if learn.armed.is_some() {
-        return;
-    } else if let Some(param) = learn.map.param_for_cc(cc) {
+        return false;
+    } else if let Some(param) = learn.map.param_for(source) {
         param
     } else {
-        return;
+        return false;
     };
     apply_learned_param(
         param,
@@ -1272,10 +1324,10 @@ fn handle_learnable_cc(
         prod,
         midi_clock,
         looper,
-        learn,
         status,
         app,
     );
+    true
 }
 
 fn fire_looper_trigger(
@@ -1310,14 +1362,12 @@ fn apply_learned_param(
     prod: &mut Producer<EngineEvent>,
     midi_clock: &MidiClock,
     looper: &mut LooperSettings,
-    learn: &mut MidiLearnState,
     status: &mut HostStatus,
     app: Option<&AppHandle>,
 ) {
     if param.is_trigger() {
-        let high = val >= 64;
-        let was = learn.trigger_high.insert(param, high).unwrap_or(false);
-        if high && !was {
+        // Buttons (MMC / Start-Stop / CC Single value 1) never send 64–127.
+        if val > 0 {
             fire_looper_trigger(param, looper, prod);
             copy_looper_controls(status, looper);
         }
