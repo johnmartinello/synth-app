@@ -179,3 +179,108 @@ export function HwSlider({
     </label>
   );
 }
+
+function snap(value: number, min: number, max: number, step: number) {
+  const span = Math.max(0.0001, max - min);
+  const raw = Math.min(max, Math.max(min, value));
+  if (step <= 0) return raw;
+  return Math.min(max, Math.max(min, min + Math.round((raw - min) / step) * step));
+}
+
+export function HwKnob({
+  label,
+  display,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  onGestureChange,
+}: {
+  label: string;
+  display?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+  onGestureChange?: (dragging: boolean) => void;
+}) {
+  const id = useId();
+  const drag = useRef<{ y: number; value: number } | null>(null);
+  const span = Math.max(0.0001, max - min);
+  const pct = (value - min) / span;
+  const angle = -135 + pct * 270;
+
+  const apply = (next: number) => {
+    const snapped = snap(next, min, max, step);
+    if (snapped !== value) onChange(snapped);
+  };
+
+  return (
+    <div className="hw-knob">
+      <Silk>{label}</Silk>
+      <div
+        id={id}
+        className="hw-knob-face"
+        role="slider"
+        tabIndex={0}
+        aria-label={label}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        aria-valuetext={display}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          drag.current = { y: e.clientY, value };
+          onGestureChange?.(true);
+        }}
+        onPointerMove={(e) => {
+          const start = drag.current;
+          if (!start) return;
+          const fine = e.shiftKey ? 0.15 : 1;
+          apply(start.value + ((start.y - e.clientY) / 84) * span * fine);
+        }}
+        onPointerUp={(e) => {
+          if (drag.current) {
+            drag.current = null;
+            onGestureChange?.(false);
+          }
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        }}
+        onPointerCancel={() => {
+          if (!drag.current) return;
+          drag.current = null;
+          onGestureChange?.(false);
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+          const dir = e.deltaY > 0 ? -1 : 1;
+          const fine = e.shiftKey ? 0.25 : 1;
+          apply(value + dir * step * fine);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+            e.preventDefault();
+            apply(value + step);
+          } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+            e.preventDefault();
+            apply(value - step);
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            apply(min);
+          } else if (e.key === "End") {
+            e.preventDefault();
+            apply(max);
+          }
+        }}
+      >
+        <i className="hw-knob-tick" style={{ "--angle": `${angle}deg` } as CSSProperties} />
+      </div>
+      <span className="hw-knob-value">{display ?? String(value)}</span>
+    </div>
+  );
+}

@@ -22,7 +22,10 @@ Dev UI is served on `http://127.0.0.1:1420` so it does not collide with other Ne
 - Config: MIDI input and Surge editor / state
 - Keyboard: live piano showing the notes currently sounding (pads, MIDI, arp, strum, sustain)
 - Strum mode (optional): compact string plate; pads only choose a chord; drag the strings or the MIDI mod touchbar (CC1) to play
-- Arp: up / down / up-down, rate, latch. Controller Arp button (CC102) toggles it. Rate follows MIDI clock from the controller (16th notes) so a built-in Rate knob can drive speed; falls back to the on-screen slider / CC18 when no clock is present
+- Arp: up / down / up-down, rate, latch. Controller Arp button (CC102) toggles it. Rate follows MIDI clock from the controller (16th notes) so a built-in Rate knob can drive speed; falls back to the on-screen Rate knob / CC18 when no clock is present
+- Filter: rotary low-pass on the output after Surge (open at 100, dark at 0). MiniLab-style CC74 maps to the same knob
+- Arp stops when you release the pad or key unless Latch is on
+- Roll: rotary knob (0–150 ms) staggers block-chord notes low-to-high. Ignored while arp or strum is on
 - Patch: Factory / third-party / user Surge XT `.fxp` presets (search, folder, prev/next)
 - Open editor: Surge GUI in a separate native window
 

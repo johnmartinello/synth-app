@@ -53,6 +53,8 @@ fn get_status() -> HostStatus {
         arp_enabled: false,
         arp_rate_hz: 8.0,
         midi_clock: false,
+        filter_cutoff: 1.0,
+        roll_ms: 0.0,
     })
 }
 
@@ -153,6 +155,16 @@ fn set_arp(
 }
 
 #[tauri::command]
+fn set_filter(state: tauri::State<AppState>, value: f32) -> Result<(), String> {
+    send_cmd(&state, HostCommand::SetFilter { value })
+}
+
+#[tauri::command]
+fn set_roll(state: tauri::State<AppState>, ms: f32) -> Result<(), String> {
+    send_cmd(&state, HostCommand::SetRoll { ms })
+}
+
+#[tauri::command]
 fn set_strum_mode(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetStrumMode { enabled })
 }
@@ -241,6 +253,8 @@ pub fn run() {
             set_chord_shape,
             set_octave,
             set_arp,
+            set_filter,
+            set_roll,
             set_strum_mode,
             set_sustain,
             set_sustain_hold,

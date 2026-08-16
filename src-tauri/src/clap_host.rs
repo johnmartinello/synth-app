@@ -259,6 +259,12 @@ pub enum HostCommand {
     LoadPreset {
         path: String,
     },
+    SetFilter {
+        value: f32,
+    },
+    SetRoll {
+        ms: f32,
+    },
     IncomingMidi(MidiBytes),
     Shutdown,
 }
@@ -280,6 +286,8 @@ pub struct HostStatus {
     pub arp_enabled: bool,
     pub arp_rate_hz: f32,
     pub midi_clock: bool,
+    pub filter_cutoff: f32,
+    pub roll_ms: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -384,6 +392,8 @@ fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
 const CC_ARP: u8 = 102;
 /// MiniLab 3 Knob 6 (Rate in arp edit). Used only when MIDI clock is absent.
 const CC_RATE: u8 = 18;
+/// Standard MIDI brightness / MiniLab knob 1. Host low-pass amount.
+const CC_FILTER: u8 = 74;
 const MIDI_CLOCK_PPQN: f64 = 24.0;
 const MIDI_CLOCK_TIMEOUT: Duration = Duration::from_millis(400);
 
@@ -472,7 +482,27 @@ fn copy_controls(status: &mut HostStatus, settings: &EngineSettings, midi_clock:
     status.arp_enabled = settings.arp_enabled;
     status.arp_rate_hz = settings.arp_rate_hz;
     status.midi_clock = midi_clock;
+    status.roll_ms = settings.roll_ms;
 }
+
+fn apply_filter(status: &mut HostStatus, value: f32, app: Option<&AppHandle>) {
+    let v = value.clamp(0.0, 1.0);
+    crate::audio::set_filter_norm(v);
+    status.filter_cutoff = v;
+    if let Some(app) = app {
+        emit_status(app, status);
+    }
+}
+
+fn push_roll(prod: &mut Producer<EngineEvent>, settings: &EngineSettings) {
+    push_engine(
+        prod,
+        EngineEvent::RollSet {
+            ms_x10: (settings.roll_ms.clamp(0.0, 150.0) * 10.0) as u16,
+        },
+    );
+}
+
 
 /// Map a 0–127 MIDI control (mod touchbar / CC1) onto the strum plate.
 fn handle_mod_touchbar(
@@ -575,6 +605,8 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         arp_enabled: false,
         arp_rate_hz: 8.0,
         midi_clock: false,
+        filter_cutoff: 1.0,
+        roll_ms: 0.0,
     };
     emit_status(&app, &status);
 
@@ -886,6 +918,9 @@ fn handle_incoming_midi(
                 emit_status(app, status);
             }
         }
+        MidiMessage::ControlChange(_ch, cc, val) if u8::from(cc) == CC_FILTER => {
+            apply_filter(status, u8::from(val) as f32 / 127.0, app);
+        }
         MidiMessage::ControlChange(_ch, cc, val)
             if u8::from(cc) == 123 || (u8::from(cc) == 120 && u8::from(val) > 0) =>
         {
@@ -944,7 +979,7 @@ fn handle_midi_note_off(
     app: Option<&AppHandle>,
 ) {
     if let Some(degree) = midi_degree_keys.remove(&key) {
-        if settings.arp_enabled {
+        if settings.arp_enabled && settings.arp_latch {
             held_pads.retain(|d| *d != degree);
         } else {
             release_degree(held_pads, degree, settings, prod);
@@ -1086,6 +1121,15 @@ fn handle_command(
             settings.arp_latch = latch;
             push_arp(prod, settings);
             copy_controls(status, settings, midi_clock.live);
+        }
+        HostCommand::SetFilter { value } => {
+            apply_filter(status, value, Some(app));
+        }
+        HostCommand::SetRoll { ms } => {
+            settings.roll_ms = ms.clamp(0.0, 150.0);
+            push_roll(prod, settings);
+            copy_controls(status, settings, midi_clock.live);
+            emit_status(app, status);
         }
         HostCommand::SetStrumMode { enabled } => {
             settings.strum_mode = enabled;

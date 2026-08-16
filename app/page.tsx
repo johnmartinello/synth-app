@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { HwButton, HwMenu, HwSlider, HwToggle, HwToggleGroup, Silk } from "./ui";
+import { HwButton, HwKnob, HwMenu, HwToggle, HwToggleGroup, Silk } from "./ui";
 
 type DiscoveryReport = {
   searched_paths: string[];
@@ -31,6 +31,8 @@ type HostStatus = {
   arp_enabled?: boolean;
   arp_rate_hz?: number;
   midi_clock?: boolean;
+  filter_cutoff?: number;
+  roll_ms?: number;
 };
 
 type PresetInfo = {
@@ -124,11 +126,16 @@ export default function Home() {
   const [arpMode, setArpMode] = useState<"up" | "down" | "up-down">("up");
   const [arpRate, setArpRate] = useState(8);
   const [arpLatch, setArpLatch] = useState(false);
+  const [filter, setFilter] = useState(1);
+  const [rollMs, setRollMs] = useState(0);
   const [strumMode, setStrumMode] = useState(false);
   const [sustain, setSustain] = useState(false);
   const [engineNotes, setEngineNotes] = useState<number[] | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const autoMidiRef = useRef(false);
+  const rateGesture = useRef(false);
+  const filterGesture = useRef(false);
+  const rollGesture = useRef(false);
 
   const previewNotes = useMemo(() => {
     if (held.size > 0) {
@@ -170,7 +177,13 @@ export default function Home() {
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
-        setStatus(await invoke<HostStatus>("get_status"));
+        const next = await invoke<HostStatus>("get_status");
+        setStatus(next);
+        if (typeof next.octave === "number") setOctave(next.octave);
+        if (typeof next.arp_enabled === "boolean") setArpOn(next.arp_enabled);
+        if (typeof next.arp_rate_hz === "number") setArpRate(next.arp_rate_hz);
+        if (typeof next.filter_cutoff === "number") setFilter(next.filter_cutoff);
+        if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
       } catch {
         /* web preview without Tauri */
       }
@@ -180,7 +193,15 @@ export default function Home() {
           setStatus(next);
           if (typeof next.octave === "number") setOctave(next.octave);
           if (typeof next.arp_enabled === "boolean") setArpOn(next.arp_enabled);
-          if (typeof next.arp_rate_hz === "number") setArpRate(next.arp_rate_hz);
+          if (typeof next.arp_rate_hz === "number" && !rateGesture.current) {
+            setArpRate(next.arp_rate_hz);
+          }
+          if (typeof next.filter_cutoff === "number" && !filterGesture.current) {
+            setFilter(next.filter_cutoff);
+          }
+          if (typeof next.roll_ms === "number" && !rollGesture.current) {
+            setRollMs(next.roll_ms);
+          }
         });
       } catch {
         /* not in Tauri */
@@ -254,6 +275,10 @@ export default function Home() {
   useEffect(() => {
     invoke("set_sustain", { enabled: sustain }).catch(() => undefined);
   }, [sustain]);
+
+  useEffect(() => {
+    invoke("set_roll", { ms: rollMs }).catch(() => undefined);
+  }, [rollMs]);
 
   useEffect(() => {
     if (autoMidiRef.current || !ports.length || status?.midi_port) {
@@ -493,23 +518,18 @@ export default function Home() {
         })}
       </section>
 
-      <section className="mb-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem] lg:items-stretch">
-        <div className="flex min-h-0 flex-col">
-          <Silk className="mb-2">Keyboard</Silk>
-          <PianoPreview notes={previewNotes} octave={octave} />
-          <p className="mt-1.5 font-[family-name:var(--font-geist-mono)] text-[11px] text-[var(--muted)]">
-            {previewNotes.length
-              ? previewNotes.map(midiToName).join("  ")
-              : "Hold a chord to see the sounding notes."}
-          </p>
+      <section className="mb-4 grid items-center gap-x-4 gap-y-2 lg:grid-cols-[minmax(0,1fr)_16rem]">
+        <Silk className="max-lg:order-1">Keyboard</Silk>
+        <div className="flex items-center justify-between gap-2 max-lg:order-3">
+          <Silk>Strum</Silk>
+          <HwToggle on={strumMode} onClick={() => setStrumMode((v) => !v)}>
+            On
+          </HwToggle>
         </div>
-        <div className="flex min-h-0 flex-col">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <Silk>Strum</Silk>
-            <HwToggle on={strumMode} onClick={() => setStrumMode((v) => !v)}>
-              On
-            </HwToggle>
-          </div>
+        <div className="max-lg:order-2">
+          <PianoPreview notes={previewNotes} octave={octave} />
+        </div>
+        <div className="max-lg:order-4">
           <StrumPlate
             notes={heldNotes}
             sounding={previewNotes}
@@ -538,13 +558,46 @@ export default function Home() {
               ]}
               onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
             />
-            <HwSlider
-              label={`Rate ${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
+          </div>
+          <div className="hw-knobs">
+            <HwKnob
+              label="Rate"
+              display={`${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
               value={arpRate}
               min={1}
               max={16}
               step={0.5}
               onChange={setArpRate}
+              onGestureChange={(on) => {
+                rateGesture.current = on;
+              }}
+            />
+            <HwKnob
+              label="Filter"
+              display={`${Math.round(filter * 100)}`}
+              value={filter}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(v) => {
+                setFilter(v);
+                invoke("set_filter", { value: v }).catch(() => undefined);
+              }}
+              onGestureChange={(on) => {
+                filterGesture.current = on;
+              }}
+            />
+            <HwKnob
+              label="Roll"
+              display={`${Math.round(rollMs)} ms`}
+              value={rollMs}
+              min={0}
+              max={150}
+              step={1}
+              onChange={setRollMs}
+              onGestureChange={(on) => {
+                rollGesture.current = on;
+              }}
             />
           </div>
         </div>
@@ -824,6 +877,7 @@ function ConfigModal({
             octave. Other notes are chromatic. Sustain pedal (CC64) and Space
             hold notes. In strum mode, the mod touchbar (CC1) sweeps the
             strings. Arp button (CC102) toggles arp. Rate follows MIDI clock.
+            Filter (CC74) is a low-pass on the output. Roll staggers block chords.
           </p>
         </div>
         <div>
@@ -905,14 +959,14 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
               {m % 12 === 0 && (
                 <span
                   className={`absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-medium ${
-                    on ? "text-[#1a1208]" : "text-[#24180a]/45"
+                    on ? "text-[#1a1208]/80" : "text-[#24180a]/45"
                   }`}
                 >
                   C{Math.floor(m / 12) - 1}
                 </span>
               )}
               {on && m % 12 !== 0 && (
-                <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-[#1a1208]">
+                <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-[#1a1208]/80">
                   {NOTE_NAMES[m % 12]}
                 </span>
               )}
@@ -927,7 +981,7 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
           <div
             key={midi}
             className={`absolute top-0 z-10 rounded-b-[2px] border border-black/50 ${
-              on ? "bg-[var(--ivory)]" : "bg-[#161616]"
+              on ? "bg-[var(--ivory-press)]" : "bg-[#161616]"
             }`}
             style={{
               left: `${((after + 1) / n) * 100}%`,
@@ -1342,7 +1396,7 @@ function StrumPlate({
   return (
     <div
       ref={plateRef}
-      className={`relative min-h-40 flex-1 touch-none select-none overflow-hidden rounded-[var(--r)] border border-[var(--line)] bg-[var(--face)] ${
+      className={`relative h-40 touch-none select-none overflow-hidden rounded-[var(--r)] border border-[var(--line)] bg-[var(--face)] ${
         !enabled ? "opacity-45" : ""
       }`}
       style={{

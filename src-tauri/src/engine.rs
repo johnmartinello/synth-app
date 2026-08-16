@@ -103,6 +103,10 @@ pub enum EngineEvent {
     },
     /// One MIDI timing-clock pulse (0xF8). Six pulses = one 16th-note arp step.
     MidiClockTick,
+    /// Piano-style chord roll. `ms_x10` is tenths of a millisecond (0–1500 → 0–150 ms).
+    RollSet {
+        ms_x10: u16,
+    },
 }
 
 /// Control-surface snapshot for the UI.
@@ -118,6 +122,7 @@ pub struct EngineSettings {
     pub arp_mode: ArpMode,
     pub arp_rate_hz: f32,
     pub arp_latch: bool,
+    pub roll_ms: f32,
     pub strum_mode: bool,
     pub sustain_sticky: bool,
     pub sustain_hold: bool,
@@ -143,6 +148,7 @@ impl Default for EngineSettings {
             arp_mode: ArpMode::Up,
             arp_rate_hz: 8.0,
             arp_latch: false,
+            roll_ms: 0.0,
             strum_mode: false,
             sustain_sticky: false,
             sustain_hold: false,
@@ -287,6 +293,11 @@ pub struct AudioEngine {
     sounding: heapless_notes::NoteSet,
     sustain: bool,
     pending_off: heapless_notes::NoteSet,
+    roll_ms: f32,
+    roll_remain: [u32; MAX_CHORD_NOTES],
+    roll_key: [u8; MAX_CHORD_NOTES],
+    roll_vel: [u8; MAX_CHORD_NOTES],
+    roll_len: u8,
 }
 
 mod heapless_notes {
@@ -382,6 +393,11 @@ impl AudioEngine {
             sounding: Default::default(),
             sustain: false,
             pending_off: Default::default(),
+            roll_ms: 0.0,
+            roll_remain: [0; MAX_CHORD_NOTES],
+            roll_key: [0; MAX_CHORD_NOTES],
+            roll_vel: [0; MAX_CHORD_NOTES],
+            roll_len: 0,
         }
     }
 
@@ -407,6 +423,7 @@ impl AudioEngine {
                     self.retarget_strum_voicing(new_notes, new_len, time, out);
                     self.chord_latched = self.arp_latch;
                 } else if self.arp_enabled {
+                    self.clear_roll();
                     self.release_pattern(time, out, true);
                     self.chord = new_notes;
                     self.chord_len = new_len;
@@ -434,7 +451,8 @@ impl AudioEngine {
                     self.chord_latched = false;
                     return;
                 }
-                self.release_pattern(time, out, false);
+                // Cut the current arp note immediately so release stops the pattern.
+                self.release_pattern(time, out, self.arp_enabled);
                 self.chord_len = 0;
                 self.chord_latched = false;
             }
@@ -460,6 +478,7 @@ impl AudioEngine {
             EngineEvent::SetStrumMode { enabled } => {
                 self.strum_mode = enabled;
                 if enabled {
+                    self.clear_roll();
                     if self.block_chord_on {
                         self.release_block(time, out, true);
                     }
@@ -490,6 +509,7 @@ impl AudioEngine {
                 self.arp_rate_hz = (rate_hz_x100 as f32 / 100.0).clamp(0.25, 32.0);
                 self.arp_latch = latch;
                 if enabled && !was {
+                    self.clear_roll();
                     if self.block_chord_on {
                         self.release_block(time, out, true);
                     }
@@ -523,11 +543,15 @@ impl AudioEngine {
                     self.step_arp(time, out);
                 }
             }
+            EngineEvent::RollSet { ms_x10 } => {
+                self.roll_ms = (ms_x10 as f32 / 10.0).clamp(0.0, 150.0);
+            }
         }
     }
 
-    /// Advance arp using the audio block length. Must run on the audio thread.
+    /// Advance arp / pending roll using the audio block length. Must run on the audio thread.
     pub fn process_clock(&mut self, frames: u32, out: &mut Vec<GeneratedNote>) {
+        self.flush_roll(frames, out);
         if self.clock_synced {
             return;
         }
@@ -593,9 +617,10 @@ impl AudioEngine {
     }
 
     fn play_block_chord(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
-        for i in 0..self.chord_len as usize {
-            self.note_on(time, self.chord[i], 100, out);
-        }
+        let n = self.chord_len as usize;
+        let mut keys = [0u8; MAX_CHORD_NOTES];
+        keys[..n].copy_from_slice(&self.chord[..n]);
+        self.schedule_roll_ons(time, &keys[..n], out);
     }
 
     fn apply_block_chord(
@@ -608,16 +633,18 @@ impl AudioEngine {
         let new_len = len.min(MAX_CHORD_NOTES as u8) as usize;
         let old = self.chord[..self.chord_len as usize].to_vec();
         let new = notes[..new_len].to_vec();
+        self.drop_roll_not_in(&new);
         for key in &old {
             if !new.contains(key) {
                 self.note_off_ex(time, *key, out, true);
             }
         }
-        for key in &new {
-            if !old.contains(key) {
-                self.note_on(time, *key, 100, out);
-            }
-        }
+        let entering: Vec<u8> = new
+            .iter()
+            .copied()
+            .filter(|key| !old.contains(key))
+            .collect();
+        self.schedule_roll_ons(time, &entering, out);
         self.chord = notes;
         self.chord_len = new_len as u8;
         self.last_chord = self.chord;
@@ -626,7 +653,78 @@ impl AudioEngine {
         self.chord_latched = self.arp_latch;
     }
 
+    fn schedule_roll_ons(&mut self, time: u32, keys: &[u8], out: &mut Vec<GeneratedNote>) {
+        if keys.is_empty() {
+            return;
+        }
+        let n = keys.len();
+        let spread = (self.roll_ms.max(0.0) as f64 / 1000.0) * self.sample_rate;
+        for (i, &key) in keys.iter().enumerate() {
+            let delay = if n <= 1 || self.roll_ms <= 0.0 {
+                0
+            } else {
+                ((i as f64) * spread / (n as f64 - 1.0)).round() as u32
+            };
+            if delay == 0 {
+                self.note_on(time, key, 100, out);
+            } else {
+                self.push_roll(delay, key, 100);
+            }
+        }
+    }
+
+    fn push_roll(&mut self, remain: u32, key: u8, vel: u8) {
+        for i in 0..self.roll_len as usize {
+            if self.roll_key[i] == key {
+                self.roll_remain[i] = remain;
+                self.roll_vel[i] = vel;
+                return;
+            }
+        }
+        if (self.roll_len as usize) >= MAX_CHORD_NOTES {
+            return;
+        }
+        let i = self.roll_len as usize;
+        self.roll_remain[i] = remain;
+        self.roll_key[i] = key;
+        self.roll_vel[i] = vel;
+        self.roll_len += 1;
+    }
+
+    fn drop_roll_not_in(&mut self, keep: &[u8]) {
+        let mut w = 0u8;
+        for i in 0..self.roll_len as usize {
+            if keep.contains(&self.roll_key[i]) {
+                self.roll_remain[w as usize] = self.roll_remain[i];
+                self.roll_key[w as usize] = self.roll_key[i];
+                self.roll_vel[w as usize] = self.roll_vel[i];
+                w += 1;
+            }
+        }
+        self.roll_len = w;
+    }
+
+    fn clear_roll(&mut self) {
+        self.roll_len = 0;
+    }
+
+    fn flush_roll(&mut self, frames: u32, out: &mut Vec<GeneratedNote>) {
+        let mut w = 0u8;
+        for i in 0..self.roll_len as usize {
+            if self.roll_remain[i] < frames {
+                self.note_on(self.roll_remain[i], self.roll_key[i], self.roll_vel[i], out);
+            } else {
+                self.roll_remain[w as usize] = self.roll_remain[i] - frames;
+                self.roll_key[w as usize] = self.roll_key[i];
+                self.roll_vel[w as usize] = self.roll_vel[i];
+                w += 1;
+            }
+        }
+        self.roll_len = w;
+    }
+
     fn release_block(&mut self, time: u32, out: &mut Vec<GeneratedNote>, force: bool) {
+        self.clear_roll();
         for i in 0..self.chord_len as usize {
             self.note_off_ex(time, self.chord[i], out, force);
         }
@@ -634,6 +732,7 @@ impl AudioEngine {
     }
 
     fn release_pattern(&mut self, time: u32, out: &mut Vec<GeneratedNote>, force: bool) {
+        self.clear_roll();
         if let Some(key) = self.arp_note.take() {
             self.note_off_ex(time, key, out, force);
         }
@@ -858,6 +957,7 @@ impl AudioEngine {
         self.chord_len = 0;
         self.last_chord_len = 0;
         self.chord_latched = false;
+        self.clear_roll();
     }
 }
 
@@ -945,6 +1045,34 @@ mod tests {
         eng.handle(EngineEvent::MidiClockTick, 0, &mut out);
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![60]);
+    }
+
+    #[test]
+    fn arp_stops_when_chord_released() {
+        let mut eng = AudioEngine::new(48_000.0);
+        let mut out = Vec::new();
+        let (notes, len) = triad();
+        eng.handle(
+            EngineEvent::ArpSet {
+                enabled: true,
+                mode: ArpMode::Up,
+                rate_hz_x100: 800,
+                latch: false,
+            },
+            0,
+            &mut out,
+        );
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        out.clear();
+        eng.process_clock(6_000, &mut out);
+        assert!(out.iter().any(|n| n.on));
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        assert!(out.iter().any(|n| !n.on));
+        assert!(out.iter().all(|n| !n.on));
+        out.clear();
+        eng.process_clock(12_000, &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -1262,5 +1390,61 @@ mod tests {
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert!(offs.is_empty());
         assert_eq!(ons, vec![62, 65, 69]);
+    }
+
+    #[test]
+    fn roll_zero_is_block_chord() {
+        let mut eng = AudioEngine::new(48_000.0);
+        let mut out = Vec::new();
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::RollSet { ms_x10: 0 }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        let ons: Vec<(u32, u8)> = out
+            .iter()
+            .filter(|n| n.on)
+            .map(|n| (n.time, n.key))
+            .collect();
+        assert_eq!(ons, vec![(0, 60), (0, 64), (0, 67)]);
+    }
+
+    #[test]
+    fn roll_staggers_triad_across_block() {
+        let mut eng = AudioEngine::new(48_000.0);
+        let mut out = Vec::new();
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::RollSet { ms_x10: 300 }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        let first: Vec<(u32, u8)> = out
+            .iter()
+            .filter(|n| n.on)
+            .map(|n| (n.time, n.key))
+            .collect();
+        assert_eq!(first, vec![(0, 60)]);
+        out.clear();
+        eng.process_clock(2048, &mut out);
+        let rest: Vec<(u32, u8)> = out
+            .iter()
+            .filter(|n| n.on)
+            .map(|n| (n.time, n.key))
+            .collect();
+        assert_eq!(rest, vec![(720, 64), (1440, 67)]);
+    }
+
+    #[test]
+    fn roll_release_cancels_unplayed_notes() {
+        let mut eng = AudioEngine::new(48_000.0);
+        let mut out = Vec::new();
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::RollSet { ms_x10: 300 }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
+        let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
+        assert_eq!(offs, vec![60]);
+        assert!(ons.is_empty());
+        out.clear();
+        eng.process_clock(2048, &mut out);
+        assert!(out.iter().all(|n| !n.on));
     }
 }

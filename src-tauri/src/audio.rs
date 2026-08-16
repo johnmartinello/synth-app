@@ -16,7 +16,67 @@ use cpal::{
 };
 use rtrb::Consumer;
 use std::error::Error;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::f32::consts::PI;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// 1.0 = open (IEEE bits of 1.0f32).
+static FILTER_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000);
+
+pub fn set_filter_norm(value: f32) {
+    FILTER_BITS.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+fn filter_norm() -> f32 {
+    f32::from_bits(FILTER_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+}
+
+/// Two cascaded one-pole low-passes on the host output (12 dB/oct).
+struct Lowpass {
+    sample_rate: f32,
+    z1: [f32; 2],
+    z2: [f32; 2],
+    coeff: f32,
+    coeff_target: f32,
+}
+
+impl Lowpass {
+    fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate: sample_rate.max(1.0) as f32,
+            z1: [0.0; 2],
+            z2: [0.0; 2],
+            coeff: 1.0,
+            coeff_target: 1.0,
+        }
+    }
+
+    fn set_norm(&mut self, norm: f32) {
+        let n = norm.clamp(0.0, 1.0);
+        self.coeff_target = if n >= 0.995 {
+            1.0
+        } else {
+            let hz = (70.0 * (18_000.0_f32 / 70.0).powf(n)).min(self.sample_rate * 0.49);
+            1.0 - (-2.0 * PI * hz / self.sample_rate).exp()
+        };
+    }
+
+    fn process_interleaved(&mut self, frames: &mut [f32], channels: usize) {
+        let ch = channels.max(1).min(2);
+        let step = channels.max(1);
+        for frame in frames.chunks_exact_mut(step) {
+            self.coeff += 0.12 * (self.coeff_target - self.coeff);
+            let a = self.coeff;
+            for c in 0..ch.min(frame.len()) {
+                let x = frame[c];
+                let y1 = self.z1[c] + a * (x - self.z1[c]);
+                self.z1[c] = y1;
+                let y2 = self.z2[c] + a * (y1 - self.z2[c]);
+                self.z2[c] = y2;
+                frame[c] = y2;
+            }
+        }
+    }
+}
 
 pub fn activate_to_stream(
     instance: &mut PluginInstance<CpalHost>,
@@ -108,6 +168,7 @@ struct StreamAudioProcessor {
     generated: Vec<GeneratedNote>,
     note_port: Option<(u16, bool)>,
     steady_counter: u64,
+    lowpass: Lowpass,
 }
 
 impl StreamAudioProcessor {
@@ -127,13 +188,13 @@ impl StreamAudioProcessor {
             generated: Vec::with_capacity(64),
             note_port,
             steady_counter: 0,
+            lowpass: Lowpass::new(sample_rate),
         }
     }
 
     fn process<S: FromSample<f32> + cpal::Sample>(&mut self, data: &mut [S]) {
         self.buffers.ensure_buffer_size_matches(data.len());
         let sample_count = self.buffers.cpal_buf_len_to_frame_count(data.len());
-        let (ins, mut outs) = self.buffers.prepare_plugin_buffers(data.len());
 
         self.generated.clear();
         while let Ok(ev) = self.engine_consumer.pop() {
@@ -157,6 +218,7 @@ impl StreamAudioProcessor {
             }
         }
 
+        let (ins, mut outs) = self.buffers.prepare_plugin_buffers(data.len());
         let input_events = self.events.as_input();
         match self.audio_processor.process(
             &ins,
@@ -166,7 +228,12 @@ impl StreamAudioProcessor {
             Some(self.steady_counter),
             None,
         ) {
-            Ok(_) => self.buffers.write_to_cpal_buffer(data),
+            Ok(_) => {
+                self.lowpass.set_norm(filter_norm());
+                let lp = &mut self.lowpass;
+                self.buffers
+                    .write_to_cpal_buffer(data, |buf, ch| lp.process_interleaved(buf, ch));
+            }
             Err(e) => log::error!("Plugin process error: {e}"),
         }
         self.steady_counter += sample_count as u64;
@@ -201,4 +268,30 @@ pub fn sounding_keys_from_mask(mask: [u64; 2]) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lowpass;
+
+    #[test]
+    fn lowpass_darkens_high_frequency() {
+        let mut open = Lowpass::new(48_000.0);
+        let mut dark = Lowpass::new(48_000.0);
+        open.set_norm(1.0);
+        dark.set_norm(0.0);
+        let mut hi_open = vec![0.0f32; 256];
+        let mut hi_dark = vec![0.0f32; 256];
+        for i in 0..128 {
+            let s = if i % 2 == 0 { 1.0 } else { -1.0 };
+            hi_open[i * 2] = s;
+            hi_open[i * 2 + 1] = s;
+            hi_dark[i * 2] = s;
+            hi_dark[i * 2 + 1] = s;
+        }
+        open.process_interleaved(&mut hi_open, 2);
+        dark.process_interleaved(&mut hi_dark, 2);
+        let energy = |buf: &[f32]| buf[128..].iter().map(|s| s * s).sum::<f32>();
+        assert!(energy(&hi_dark) < energy(&hi_open) * 0.25);
+    }
 }

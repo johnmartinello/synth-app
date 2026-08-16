@@ -136,7 +136,11 @@ impl HostAudioBuffers {
         )
     }
 
-    pub fn write_to_cpal_buffer<S: FromSample<f32> + Sample>(&mut self, destination: &mut [S]) {
+    pub fn write_to_cpal_buffer<S, F>(&mut self, destination: &mut [S], mut process: F)
+    where
+        S: FromSample<f32> + Sample,
+        F: FnMut(&mut [f32], usize),
+    {
         if self.output_port_channels.is_empty() {
             destination.fill(S::from_sample(0.0));
             return;
@@ -161,6 +165,8 @@ impl HostAudioBuffers {
             (_, 2) => mux(main_output, muxed, 2),
             (_, _) => unreachable!(),
         }
+
+        process(muxed, self.config.output_channel_count);
 
         for (out, sample) in destination.iter_mut().zip(muxed.iter()) {
             *out = (*sample).to_sample();
