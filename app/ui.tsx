@@ -187,6 +187,14 @@ function snap(value: number, min: number, max: number, step: number) {
   return Math.min(max, Math.max(min, min + Math.round((raw - min) / step) * step));
 }
 
+export type HwKnobMidi = {
+  paramId: string;
+  cc?: number;
+  learning: boolean;
+  onLearn: () => void;
+  onClear: () => void;
+};
+
 export function HwKnob({
   label,
   display,
@@ -196,6 +204,7 @@ export function HwKnob({
   step,
   onChange,
   onGestureChange,
+  midi,
 }: {
   label?: string;
   display?: string;
@@ -205,6 +214,7 @@ export function HwKnob({
   step: number;
   onChange: (v: number) => void;
   onGestureChange?: (dragging: boolean) => void;
+  midi?: HwKnobMidi;
 }) {
   const id = useId();
   const drag = useRef<{ y: number; value: number } | null>(null);
@@ -217,68 +227,105 @@ export function HwKnob({
     if (snapped !== value) onChange(snapped);
   };
 
+  const midiLabel = midi
+    ? midi.learning
+      ? "Learn"
+      : midi.cc != null
+        ? `CC${midi.cc}`
+        : "MIDI"
+    : null;
+
   return (
     <div className="hw-knob">
       {label ? <Silk>{label}</Silk> : null}
-      <div
-        id={id}
-        className="hw-knob-face"
-        role="slider"
-        tabIndex={0}
-        aria-label={label ?? display ?? "Knob"}
-        aria-valuemin={min}
-        aria-valuemax={max}
-        aria-valuenow={value}
-        aria-valuetext={display}
-        onPointerDown={(e) => {
-          e.preventDefault();
-          e.currentTarget.setPointerCapture(e.pointerId);
-          drag.current = { y: e.clientY, value };
-          onGestureChange?.(true);
-        }}
-        onPointerMove={(e) => {
-          const start = drag.current;
-          if (!start) return;
-          const fine = e.shiftKey ? 0.15 : 1;
-          apply(start.value + ((start.y - e.clientY) / 84) * span * fine);
-        }}
-        onPointerUp={(e) => {
-          if (drag.current) {
+      <div className="hw-knob-dial">
+        <div
+          id={id}
+          className="hw-knob-face"
+          role="slider"
+          tabIndex={0}
+          aria-label={label ?? display ?? "Knob"}
+          aria-valuemin={min}
+          aria-valuemax={max}
+          aria-valuenow={value}
+          aria-valuetext={display}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            drag.current = { y: e.clientY, value };
+            onGestureChange?.(true);
+          }}
+          onPointerMove={(e) => {
+            const start = drag.current;
+            if (!start) return;
+            const fine = e.shiftKey ? 0.15 : 1;
+            apply(start.value + ((start.y - e.clientY) / 84) * span * fine);
+          }}
+          onPointerUp={(e) => {
+            if (drag.current) {
+              drag.current = null;
+              onGestureChange?.(false);
+            }
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            }
+          }}
+          onPointerCancel={() => {
+            if (!drag.current) return;
             drag.current = null;
             onGestureChange?.(false);
-          }
-          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          }
-        }}
-        onPointerCancel={() => {
-          if (!drag.current) return;
-          drag.current = null;
-          onGestureChange?.(false);
-        }}
-        onWheel={(e) => {
-          e.preventDefault();
-          const dir = e.deltaY > 0 ? -1 : 1;
-          const fine = e.shiftKey ? 0.25 : 1;
-          apply(value + dir * step * fine);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+          }}
+          onWheel={(e) => {
             e.preventDefault();
-            apply(value + step);
-          } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-            e.preventDefault();
-            apply(value - step);
-          } else if (e.key === "Home") {
-            e.preventDefault();
-            apply(min);
-          } else if (e.key === "End") {
-            e.preventDefault();
-            apply(max);
-          }
-        }}
-      >
-        <i className="hw-knob-tick" style={{ "--angle": `${angle}deg` } as CSSProperties} />
+            const dir = e.deltaY > 0 ? -1 : 1;
+            const fine = e.shiftKey ? 0.25 : 1;
+            apply(value + dir * step * fine);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+              e.preventDefault();
+              apply(value + step);
+            } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+              e.preventDefault();
+              apply(value - step);
+            } else if (e.key === "Home") {
+              e.preventDefault();
+              apply(min);
+            } else if (e.key === "End") {
+              e.preventDefault();
+              apply(max);
+            }
+          }}
+        >
+          <i className="hw-knob-tick" style={{ "--angle": `${angle}deg` } as CSSProperties} />
+        </div>
+        {midi ? (
+          <button
+            type="button"
+            className="hw-midi-chip"
+            data-on={midi.learning ? "true" : undefined}
+            data-mapped={midi.cc != null && !midi.learning ? "true" : undefined}
+            aria-label={
+              midi.learning
+                ? `Cancel MIDI learn for ${label ?? midi.paramId}`
+                : midi.cc != null
+                  ? `${label ?? midi.paramId} mapped to CC ${midi.cc}. Click to relearn, right-click to clear.`
+                  : `MIDI learn ${label ?? midi.paramId}`
+            }
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              midi.onLearn();
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              midi.onClear();
+            }}
+          >
+            {midiLabel}
+          </button>
+        ) : null}
       </div>
       <span className="hw-knob-value">{display ?? String(value)}</span>
     </div>

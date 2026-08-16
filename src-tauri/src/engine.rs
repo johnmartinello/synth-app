@@ -103,7 +103,7 @@ pub enum EngineEvent {
     },
     /// One MIDI timing-clock pulse (0xF8). Six pulses = one 16th-note arp step.
     MidiClockTick,
-    /// Piano-style chord roll. `ms_x10` is tenths of a millisecond (0–1500 → 0–150 ms).
+    /// Piano-style chord roll. `ms_x10` is tenths of a millisecond (0–5000 → 0–500 ms).
     RollSet {
         ms_x10: u16,
     },
@@ -115,6 +115,13 @@ pub enum EngineEvent {
         sustain: f32,
         release: f32,
     },
+}
+
+/// Whole-millisecond roll range (UI step is 1 ms).
+pub const ROLL_MAX_MS: f32 = 500.0;
+
+pub fn sanitize_roll_ms(ms: f32) -> f32 {
+    ms.round().clamp(0.0, ROLL_MAX_MS)
 }
 
 /// Control-surface snapshot for the UI.
@@ -496,9 +503,7 @@ impl AudioEngine {
                 }
                 if self.strum_mode {
                     let _ = self.env.gate_off();
-                    if self.strum_mask != 0 {
-                        self.apply_strum_mask(time, 0, 0, out);
-                    }
+                    self.mute_strum_strings(time, out, !self.sustain);
                     self.chord_len = 0;
                     self.chord_latched = false;
                     return;
@@ -606,7 +611,7 @@ impl AudioEngine {
                 }
             }
             EngineEvent::RollSet { ms_x10 } => {
-                self.roll_ms = (ms_x10 as f32 / 10.0).clamp(0.0, 150.0);
+                self.roll_ms = sanitize_roll_ms(ms_x10 as f32 / 10.0);
             }
             EngineEvent::SetEnvelope {
                 delay,
@@ -936,9 +941,25 @@ impl AudioEngine {
         self.strum_last = None;
     }
 
-    fn clear_strum(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
+    fn mute_strum_strings(&mut self, time: u32, out: &mut Vec<GeneratedNote>, force: bool) {
+        if force {
+            self.park_strum();
+            self.apply_strum_mask(time, 0, 0, out);
+            return;
+        }
+        let (chord, n) = self.copy_strum_chord();
+        let mask = self.strum_mask;
         self.park_strum();
-        self.apply_strum_mask(time, 0, 0, out);
+        self.strum_mask = 0;
+        for i in 0..n {
+            if mask & (1 << i) != 0 {
+                self.note_off_ex(time, chord[i], out, false);
+            }
+        }
+    }
+
+    fn clear_strum(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
+        self.mute_strum_strings(time, out, true);
     }
 
     fn retrigger(&mut self, time: u32, key: u8, vel: u8, out: &mut Vec<GeneratedNote>) {
@@ -1460,7 +1481,6 @@ mod tests {
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
-        eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
         eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
@@ -1469,6 +1489,26 @@ mod tests {
         assert!(out.is_empty());
         out.clear();
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
+        assert_eq!(offs, vec![60, 64, 67]);
+    }
+
+    #[test]
+    fn strum_sustain_holds_after_key_up() {
+        let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
+        let mut out = Vec::new();
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
+        eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        eng.handle(EngineEvent::Strum { pos: 0, restart: true }, 0, &mut out);
+        eng.handle(EngineEvent::Strum { pos: 255, restart: false }, 0, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        assert!(out.iter().all(|n| n.on), "sustain must keep strummed notes");
+        out.clear();
+        eng.handle(EngineEvent::Sustain { on: false }, 0, &mut out);
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         assert_eq!(offs, vec![60, 64, 67]);
     }

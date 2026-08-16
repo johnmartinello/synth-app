@@ -6,10 +6,12 @@ mod timer;
 use crate::audio::activate_to_stream;
 use crate::discovery::{self, DiscoveryReport};
 use crate::engine::{
-    midi_octave, midi_to_degree, ArpMode, ChordType, EngineEvent, EngineSettings, ScaleKind,
-    Secondary, MAX_CHORD_NOTES,
+    midi_octave, midi_to_degree, sanitize_roll_ms, ArpMode, ChordType, EngineEvent, EngineSettings,
+    ScaleKind, Secondary, MAX_CHORD_NOTES,
 };
-use crate::midi::{self, MidiBytes};
+use crate::envelope::EnvelopeParams;
+use crate::midi::{self, MidiBytes, MidiPadState};
+use crate::midi_learn::{self, LearnableParam, MidiLearnMap, MidiLearnState};
 use clack_extensions::audio_ports::{AudioPortRescanFlags, HostAudioPortsImpl};
 use clack_extensions::gui::{GuiSize, HostGui, PluginGui};
 use clack_extensions::log::{HostLog, HostLogImpl, LogSeverity};
@@ -273,6 +275,13 @@ pub enum HostCommand {
         sustain: f32,
         release: f32,
     },
+    MidiLearn {
+        param: LearnableParam,
+    },
+    MidiLearnCancel,
+    MidiUnmap {
+        param: LearnableParam,
+    },
     IncomingMidi(MidiBytes),
     Shutdown,
 }
@@ -296,6 +305,9 @@ pub struct HostStatus {
     pub midi_clock: bool,
     pub filter_cutoff: f32,
     pub roll_ms: f32,
+    pub midi_learn: Option<String>,
+    pub midi_maps: HashMap<String, u8>,
+    pub envelope: EnvelopeParams,
 }
 
 #[derive(Clone, Serialize)]
@@ -416,10 +428,6 @@ fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
 
 /// MiniLab 3 Pad 1 (Arp). Toggle/gate CC: ≥64 on, <64 off.
 const CC_ARP: u8 = 102;
-/// MiniLab 3 Knob 6 (Rate in arp edit). Used only when MIDI clock is absent.
-const CC_RATE: u8 = 18;
-/// Standard MIDI brightness / MiniLab knob 1. Host low-pass amount.
-const CC_FILTER: u8 = 74;
 const MIDI_CLOCK_PPQN: f64 = 24.0;
 const MIDI_CLOCK_TIMEOUT: Duration = Duration::from_millis(400);
 
@@ -511,6 +519,36 @@ fn copy_controls(status: &mut HostStatus, settings: &EngineSettings, midi_clock:
     status.roll_ms = settings.roll_ms;
 }
 
+fn copy_learn(status: &mut HostStatus, learn: &MidiLearnState) {
+    status.midi_learn = learn.armed.map(LearnableParam::as_id).map(str::to_string);
+    status.midi_maps = learn.map.to_status_maps();
+}
+
+fn copy_envelope(status: &mut HostStatus, envelope: &EnvelopeParams) {
+    status.envelope = *envelope;
+}
+
+fn persist_learn(app: &AppHandle, map: &MidiLearnMap) {
+    if let Some(path) = midi_learn::file_path(app) {
+        map.save(&path);
+    }
+}
+
+fn push_envelope(prod: &mut Producer<EngineEvent>, envelope: &EnvelopeParams) {
+    let env = envelope.sanitized();
+    push_engine(
+        prod,
+        EngineEvent::SetEnvelope {
+            delay: env.delay,
+            attack: env.attack,
+            hold: env.hold,
+            decay: env.decay,
+            sustain: env.sustain,
+            release: env.release,
+        },
+    );
+}
+
 fn apply_filter(status: &mut HostStatus, value: f32, app: Option<&AppHandle>) {
     let v = value.clamp(0.0, 1.0);
     crate::audio::set_filter_norm(v);
@@ -524,7 +562,7 @@ fn push_roll(prod: &mut Producer<EngineEvent>, settings: &EngineSettings) {
     push_engine(
         prod,
         EngineEvent::RollSet {
-            ms_x10: (settings.roll_ms.clamp(0.0, 150.0) * 10.0) as u16,
+            ms_x10: (sanitize_roll_ms(settings.roll_ms) * 10.0) as u16,
         },
     );
 }
@@ -633,6 +671,9 @@ pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
         midi_clock: false,
         filter_cutoff: 1.0,
         roll_ms: 0.0,
+        midi_learn: None,
+        midi_maps: MidiLearnMap::defaults().to_status_maps(),
+        envelope: EnvelopeParams::default(),
     };
     emit_status(&app, &status);
 
@@ -707,11 +748,20 @@ fn run_with_plugin(
     let mut event_loop: Option<EventLoop<()>> = None;
     let mut window: Option<Window> = None;
     let mut settings = EngineSettings::default();
-    let mut midi_conn: Option<MidiInputConnection<()>> = None;
-    let mut midi_degree_keys: HashMap<u8, u8> = HashMap::new();
+    let mut envelope = EnvelopeParams::default();
+    let mut midi_conn: Option<MidiInputConnection<u8>> = None;
+    let mut midi_pads = MidiPadState::new();
     let mut held_pads: Vec<u8> = Vec::new();
     let (midi_bytes_tx, midi_bytes_rx) = unbounded::<MidiBytes>();
     let mut midi_clock = MidiClock::new();
+    let mut learn = MidiLearnState::new(
+        midi_learn::file_path(&app)
+            .map(|path| MidiLearnMap::load(&path))
+            .unwrap_or_else(MidiLearnMap::defaults),
+    );
+    copy_learn(status, &learn);
+    copy_envelope(status, &envelope);
+    emit_status(&app, status);
     let mut last_notes = [0u64; 2];
     let mut last_env = u32::MAX;
 
@@ -720,8 +770,10 @@ fn run_with_plugin(
             handle_incoming_midi(
                 bytes,
                 &mut settings,
+                &mut envelope,
+                &mut learn,
                 &mut engine_prod,
-                &mut midi_degree_keys,
+                &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
                 status,
@@ -734,6 +786,10 @@ fn run_with_plugin(
                 EngineEvent::MidiClockSync { on: false },
             );
             copy_controls(status, &settings, false);
+            emit_status(&app, status);
+        }
+        if learn.poll_timeout() {
+            copy_learn(status, &learn);
             emit_status(&app, status);
         }
 
@@ -753,12 +809,14 @@ fn run_with_plugin(
                 &mut instance,
                 &mut engine_prod,
                 &mut settings,
+                &mut envelope,
+                &mut learn,
                 &mut gui,
                 &mut event_loop,
                 &mut window,
                 &mut midi_conn,
                 &midi_bytes_tx,
-                &mut midi_degree_keys,
+                &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
                 status,
@@ -774,12 +832,14 @@ fn run_with_plugin(
                 &mut instance,
                 &mut engine_prod,
                 &mut settings,
+                &mut envelope,
+                &mut learn,
                 &mut gui,
                 &mut event_loop,
                 &mut window,
                 &mut midi_conn,
                 &midi_bytes_tx,
-                &mut midi_degree_keys,
+                &mut midi_pads,
                 &mut held_pads,
                 &mut midi_clock,
                 status,
@@ -856,8 +916,10 @@ fn run_with_plugin(
 fn handle_incoming_midi(
     bytes: MidiBytes,
     settings: &mut EngineSettings,
+    envelope: &mut EnvelopeParams,
+    learn: &mut MidiLearnState,
     prod: &mut Producer<EngineEvent>,
-    midi_degree_keys: &mut HashMap<u8, u8>,
+    midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     status: &mut HostStatus,
@@ -876,7 +938,7 @@ fn handle_incoming_midi(
             let key = u8::from(note);
             let vel = u8::from(velocity);
             if vel == 0 {
-                handle_midi_note_off(key, settings, prod, midi_degree_keys, held_pads, app);
+                handle_midi_note_off(key, settings, prod, midi_pads, held_pads, app);
                 return;
             }
             stop_test_c(prod, status);
@@ -884,12 +946,11 @@ fn handle_incoming_midi(
                 let oct = midi_octave(key).clamp(1, 7);
                 let oct_changed = oct != settings.octave;
                 settings.octave = oct;
-                let same_chord = held_pads.last() == Some(&degree);
-                midi_degree_keys.insert(key, degree);
-                if same_chord && settings.arp_enabled && !oct_changed {
-                    // Hardware arp retriggers the same degree; keep the chord.
-                } else {
-                    press_degree(held_pads, degree, settings, prod);
+                if let Some(degree) = midi_pads.note_on(key, degree) {
+                    let same_chord = held_pads.last() == Some(&degree);
+                    if !(same_chord && settings.arp_enabled && !oct_changed) {
+                        press_degree(held_pads, degree, settings, prod);
+                    }
                 }
                 emit_pads_ui(app, held_pads);
                 if oct_changed {
@@ -907,7 +968,7 @@ fn handle_incoming_midi(
                 u8::from(note),
                 settings,
                 prod,
-                midi_degree_keys,
+                midi_pads,
                 held_pads,
                 app,
             );
@@ -937,27 +998,109 @@ fn handle_incoming_midi(
             }
         }
         MidiMessage::ControlChange(_ch, cc, val)
-            if u8::from(cc) == CC_RATE && !midi_clock.live =>
-        {
-            settings.arp_rate_hz = 1.0 + (u8::from(val) as f32 / 127.0) * 15.0;
-            push_arp(prod, settings);
-            copy_controls(status, settings, false);
-            if let Some(app) = app {
-                emit_status(app, status);
-            }
-        }
-        MidiMessage::ControlChange(_ch, cc, val) if u8::from(cc) == CC_FILTER => {
-            apply_filter(status, u8::from(val) as f32 / 127.0, app);
-        }
-        MidiMessage::ControlChange(_ch, cc, val)
             if u8::from(cc) == 123 || (u8::from(cc) == 120 && u8::from(val) > 0) =>
         {
             held_pads.clear();
-            midi_degree_keys.clear();
+            midi_pads.clear();
             push_engine(prod, EngineEvent::Panic);
             emit_pads_ui(app, held_pads);
         }
+        MidiMessage::ControlChange(_ch, cc, val) => {
+            handle_learnable_cc(
+                u8::from(cc),
+                u8::from(val),
+                settings,
+                envelope,
+                learn,
+                prod,
+                midi_clock,
+                status,
+                app,
+            );
+        }
         _ => {}
+    }
+}
+
+fn handle_learnable_cc(
+    cc: u8,
+    val: u8,
+    settings: &mut EngineSettings,
+    envelope: &mut EnvelopeParams,
+    learn: &mut MidiLearnState,
+    prod: &mut Producer<EngineEvent>,
+    midi_clock: &MidiClock,
+    status: &mut HostStatus,
+    app: Option<&AppHandle>,
+) {
+    let param = if let Some(param) = learn.try_learn(cc) {
+        if let Some(app) = app {
+            persist_learn(app, &learn.map);
+        }
+        copy_learn(status, learn);
+        param
+    } else if learn.armed.is_some() {
+        return;
+    } else if let Some(param) = learn.map.param_for_cc(cc) {
+        param
+    } else {
+        return;
+    };
+    apply_learned_param(
+        param,
+        val,
+        settings,
+        envelope,
+        prod,
+        midi_clock,
+        status,
+        app,
+    );
+}
+
+fn apply_learned_param(
+    param: LearnableParam,
+    val: u8,
+    settings: &mut EngineSettings,
+    envelope: &mut EnvelopeParams,
+    prod: &mut Producer<EngineEvent>,
+    midi_clock: &MidiClock,
+    status: &mut HostStatus,
+    app: Option<&AppHandle>,
+) {
+    let value = midi_learn::cc_to_value(param, val);
+    match param {
+        LearnableParam::ArpRate => {
+            if !midi_clock.live {
+                settings.arp_rate_hz = value;
+                push_arp(prod, settings);
+            }
+        }
+        LearnableParam::Filter => {
+            apply_filter(status, value, None);
+        }
+        LearnableParam::Roll => {
+            let ms = sanitize_roll_ms(value);
+            if (settings.roll_ms - ms).abs() >= 0.5 {
+                settings.roll_ms = ms;
+                push_roll(prod, settings);
+            }
+        }
+        LearnableParam::EnvDelay => envelope.delay = value,
+        LearnableParam::EnvAttack => envelope.attack = value,
+        LearnableParam::EnvHold => envelope.hold = value,
+        LearnableParam::EnvDecay => envelope.decay = value,
+        LearnableParam::EnvSustain => envelope.sustain = value,
+        LearnableParam::EnvRelease => envelope.release = value,
+    }
+    if param.is_envelope() {
+        *envelope = envelope.sanitized();
+        push_envelope(prod, envelope);
+        copy_envelope(status, envelope);
+    }
+    copy_controls(status, settings, midi_clock.live);
+    if let Some(app) = app {
+        emit_status(app, status);
     }
 }
 
@@ -1002,18 +1145,18 @@ fn handle_midi_note_off(
     key: u8,
     settings: &EngineSettings,
     prod: &mut Producer<EngineEvent>,
-    midi_degree_keys: &mut HashMap<u8, u8>,
+    midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
     app: Option<&AppHandle>,
 ) {
-    if let Some(degree) = midi_degree_keys.remove(&key) {
+    if let Some(degree) = midi_pads.note_off(key) {
         if settings.arp_enabled && settings.arp_latch {
             held_pads.retain(|d| *d != degree);
         } else {
             release_degree(held_pads, degree, settings, prod);
         }
         emit_pads_ui(app, held_pads);
-    } else {
+    } else if midi_to_degree(key).is_none() {
         push_engine(prod, EngineEvent::ChromaticOff { key });
     }
 }
@@ -1062,12 +1205,14 @@ fn handle_command(
     instance: &mut PluginInstance<CpalHost>,
     prod: &mut Producer<EngineEvent>,
     settings: &mut EngineSettings,
+    envelope: &mut EnvelopeParams,
+    learn: &mut MidiLearnState,
     gui: &mut Option<Gui>,
     event_loop: &mut Option<EventLoop<()>>,
     window: &mut Option<Window>,
-    midi_conn: &mut Option<MidiInputConnection<()>>,
+    midi_conn: &mut Option<MidiInputConnection<u8>>,
     midi_bytes_tx: &Sender<MidiBytes>,
-    midi_degree_keys: &mut HashMap<u8, u8>,
+    midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     status: &mut HostStatus,
@@ -1078,8 +1223,10 @@ fn handle_command(
             handle_incoming_midi(
                 bytes,
                 settings,
+                envelope,
+                learn,
                 prod,
-                midi_degree_keys,
+                midi_pads,
                 held_pads,
                 midi_clock,
                 status,
@@ -1096,7 +1243,7 @@ fn handle_command(
         }
         HostCommand::Panic => {
             held_pads.clear();
-            midi_degree_keys.clear();
+            midi_pads.clear();
             push_engine(prod, EngineEvent::Panic);
             status.test_c_playing = false;
             status.message = None;
@@ -1114,7 +1261,11 @@ fn handle_command(
             emit_pads_ui(Some(app), held_pads);
         }
         HostCommand::SetKey { root, scale } => {
-            settings.root = root % 12;
+            let root = root % 12;
+            if settings.root == root && settings.scale == scale {
+                return;
+            }
+            settings.root = root;
             settings.scale = scale;
             refresh_held_chord(held_pads, settings, prod);
         }
@@ -1123,14 +1274,25 @@ fn handle_command(
             inversion,
             secondary,
         } => {
-            settings.chord_type = chord_type;
             let max_inv = chord_type.tone_count().saturating_sub(1) as u8;
-            settings.inversion = inversion.min(max_inv);
+            let inversion = inversion.min(max_inv);
+            if settings.chord_type == chord_type
+                && settings.inversion == inversion
+                && settings.secondary == secondary
+            {
+                return;
+            }
+            settings.chord_type = chord_type;
+            settings.inversion = inversion;
             settings.secondary = secondary;
             refresh_held_chord(held_pads, settings, prod);
         }
         HostCommand::SetOctave { octave } => {
-            settings.octave = octave.clamp(1, 7);
+            let octave = octave.clamp(1, 7);
+            if settings.octave == octave {
+                return;
+            }
+            settings.octave = octave;
             copy_controls(status, settings, midi_clock.live);
             refresh_held_chord(held_pads, settings, prod);
             emit_status(app, status);
@@ -1154,7 +1316,11 @@ fn handle_command(
             apply_filter(status, value, Some(app));
         }
         HostCommand::SetRoll { ms } => {
-            settings.roll_ms = ms.clamp(0.0, 150.0);
+            let ms = sanitize_roll_ms(ms);
+            if (settings.roll_ms - ms).abs() < 0.5 {
+                return;
+            }
+            settings.roll_ms = ms;
             push_roll(prod, settings);
             copy_controls(status, settings, midi_clock.live);
             emit_status(app, status);
@@ -1167,17 +1333,36 @@ fn handle_command(
             sustain,
             release,
         } => {
-            push_engine(
-                prod,
-                EngineEvent::SetEnvelope {
-                    delay,
-                    attack,
-                    hold,
-                    decay,
-                    sustain,
-                    release,
-                },
-            );
+            *envelope = EnvelopeParams {
+                delay,
+                attack,
+                hold,
+                decay,
+                sustain,
+                release,
+            }
+            .sanitized();
+            push_envelope(prod, envelope);
+            copy_envelope(status, envelope);
+        }
+        HostCommand::MidiLearn { param } => {
+            learn.arm(param);
+            copy_learn(status, learn);
+            emit_status(app, status);
+        }
+        HostCommand::MidiLearnCancel => {
+            learn.cancel();
+            copy_learn(status, learn);
+            emit_status(app, status);
+        }
+        HostCommand::MidiUnmap { param } => {
+            learn.map.unmap(param);
+            if learn.armed == Some(param) {
+                learn.cancel();
+            }
+            persist_learn(app, &learn.map);
+            copy_learn(status, learn);
+            emit_status(app, status);
         }
         HostCommand::SetStrumMode { enabled } => {
             settings.strum_mode = enabled;

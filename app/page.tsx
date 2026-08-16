@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
-import { HwButton, HwKnob, HwMenu, HwToggle, HwToggleGroup, Silk } from "./ui";
+import { HwButton, HwKnob, HwMenu, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
 type DiscoveryReport = {
   searched_paths: string[];
@@ -34,6 +34,9 @@ type HostStatus = {
   midi_clock?: boolean;
   filter_cutoff?: number;
   roll_ms?: number;
+  midi_learn?: string | null;
+  midi_maps?: Record<string, number>;
+  envelope?: EnvParams;
 };
 
 type PresetInfo = {
@@ -137,6 +140,7 @@ export default function Home() {
   const rateGesture = useRef(false);
   const filterGesture = useRef(false);
   const rollGesture = useRef(false);
+  const envGesture = useRef(false);
 
   const previewNotes = useMemo(() => {
     if (held.size > 0) {
@@ -185,6 +189,7 @@ export default function Home() {
         if (typeof next.arp_rate_hz === "number") setArpRate(next.arp_rate_hz);
         if (typeof next.filter_cutoff === "number") setFilter(next.filter_cutoff);
         if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
+        if (next.envelope) setEnv(next.envelope);
       } catch {
         /* web preview without Tauri */
       }
@@ -202,6 +207,9 @@ export default function Home() {
           }
           if (typeof next.roll_ms === "number" && !rollGesture.current) {
             setRollMs(next.roll_ms);
+          }
+          if (next.envelope && !envGesture.current) {
+            setEnv(next.envelope);
           }
         });
       } catch {
@@ -256,9 +264,10 @@ export default function Home() {
     invoke("set_chord_shape", { chordType, inversion, secondary }).catch(() => undefined);
   }, [chordType, inversion, secondary]);
 
-  useEffect(() => {
-    invoke("set_octave", { octave }).catch(() => undefined);
-  }, [octave]);
+  const bumpOctave = (next: number) => {
+    setOctave(next);
+    invoke("set_octave", { octave: next }).catch(() => undefined);
+  };
 
   useEffect(() => {
     invoke("set_arp", {
@@ -272,10 +281,6 @@ export default function Home() {
   useEffect(() => {
     invoke("set_strum_mode", { enabled: strumMode }).catch(() => undefined);
   }, [strumMode]);
-
-  useEffect(() => {
-    invoke("set_roll", { ms: rollMs }).catch(() => undefined);
-  }, [rollMs]);
 
   useEffect(() => {
     invoke("set_envelope", env).catch(() => undefined);
@@ -292,6 +297,27 @@ export default function Home() {
     rememberMidiPort(name);
     invoke("open_midi_port", { portName: name }).catch(() => undefined);
   }, [ports, status?.midi_port]);
+
+  const midiFor = useCallback(
+    (paramId: string): HwKnobMidi => {
+      const cc = status?.midi_maps?.[paramId];
+      const learning = status?.midi_learn === paramId;
+      return {
+        paramId,
+        cc,
+        learning,
+        onLearn: () => {
+          if (learning) {
+            invoke("cancel_midi_learn").catch(() => undefined);
+          } else {
+            invoke("start_midi_learn", { paramId }).catch(() => undefined);
+          }
+        },
+        onClear: () => invoke("unmap_midi", { paramId }).catch(() => undefined),
+      };
+    },
+    [status?.midi_learn, status?.midi_maps],
+  );
 
   const padDown = useCallback((degree: number) => {
     setArmed(degree);
@@ -349,6 +375,10 @@ export default function Home() {
       if (degree != null && !e.repeat && !typingField(e.target)) {
         e.preventDefault();
         padDown(degree);
+        return;
+      }
+      if (e.code === "Escape") {
+        invoke("cancel_midi_learn").catch(() => undefined);
         return;
       }
       if (e.code !== "Space" || e.repeat || isTypingTarget(e.target)) return;
@@ -450,14 +480,14 @@ export default function Home() {
           <div className="hw-cluster">
             <HwButton
               disabled={octave <= 1}
-              onClick={() => setOctave((n) => Math.max(1, n - 1))}
+              onClick={() => bumpOctave(Math.max(1, octave - 1))}
             >
               −
             </HwButton>
             <HwButton className="min-w-8">{octave}</HwButton>
             <HwButton
               disabled={octave >= 7}
-              onClick={() => setOctave((n) => Math.min(7, n + 1))}
+              onClick={() => bumpOctave(Math.min(7, octave + 1))}
             >
               +
             </HwButton>
@@ -516,7 +546,14 @@ export default function Home() {
             );
           })}
         </div>
-        <EnvelopePanel params={env} onChange={setEnv} />
+        <EnvelopePanel
+          params={env}
+          onChange={setEnv}
+          midi={midiFor}
+          onGestureChange={(on) => {
+            envGesture.current = on;
+          }}
+        />
       </section>
 
       <section className="mb-4 grid items-center gap-x-4 gap-y-2 lg:grid-cols-[minmax(0,1fr)_16rem]">
@@ -571,6 +608,7 @@ export default function Home() {
             onGestureChange={(on) => {
               rateGesture.current = on;
             }}
+            midi={midiFor("arp_rate")}
           />
           <HwKnob
             label="Filter"
@@ -586,18 +624,23 @@ export default function Home() {
             onGestureChange={(on) => {
               filterGesture.current = on;
             }}
+            midi={midiFor("filter")}
           />
           <HwKnob
             label="Roll"
             display={`${Math.round(rollMs)} ms`}
             value={rollMs}
             min={0}
-            max={150}
+            max={500}
             step={1}
-            onChange={setRollMs}
+            onChange={(v) => {
+              setRollMs(v);
+              invoke("set_roll", { ms: v }).catch(() => undefined);
+            }}
             onGestureChange={(on) => {
               rollGesture.current = on;
             }}
+            midi={midiFor("roll")}
           />
         </div>
       </section>
@@ -872,8 +915,10 @@ function ConfigModal({
             octave. Other notes are chromatic. The Env sustain knob is the
             hold level; Space and the sustain pedal (CC64) keep the gate
             open. In strum mode, the mod touchbar (CC1) sweeps the
-            strings. Arp button (CC102) toggles arp. Rate follows MIDI clock.
-            Filter (CC74) is a low-pass on the output. Roll staggers block chords.
+            strings. Arp button (CC102) toggles arp. Rate follows MIDI clock
+            when present. Click MIDI next to a knob, then move a controller
+            knob to assign it (right-click to clear). Filter is a low-pass on
+            the output. Roll staggers block chords.
           </p>
         </div>
         <div>

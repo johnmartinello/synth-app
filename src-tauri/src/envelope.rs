@@ -1,5 +1,7 @@
 //! Global DAHDSR amp envelope. Lives on the audio thread.
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EnvStage {
     Idle,
@@ -11,7 +13,7 @@ pub enum EnvStage {
     Release,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvelopeParams {
     pub delay: f32,
     pub attack: f32,

@@ -248,6 +248,43 @@ input {
   touch-action: none;
 }
 
+.hw-knob-dial {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.hw-midi-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--face);
+  color: var(--muted);
+  border-radius: var(--r);
+  padding: 0.18rem 0.28rem;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  min-width: 2.15rem;
+}
+
+.hw-midi-chip:hover {
+  border-color: var(--muted);
+}
+
+.hw-midi-chip[data-on="true"] {
+  background: var(--amber);
+  color: #1a1208;
+  border-color: var(--amber);
+}
+
+.hw-midi-chip[data-mapped="true"] {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
 .hw-knob-face {
   position: relative;
   width: 44px;
@@ -523,6 +560,12 @@ input {
   top: 5px;
   height: 8px;
   transform-origin: 50% 12px;
+}
+
+.env-knobs .hw-midi-chip {
+  font-size: 7px;
+  padding: 0.12rem 0.2rem;
+  min-width: 1.85rem;
 }
 
 .hw-pad:hover {

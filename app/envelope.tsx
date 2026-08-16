@@ -2,7 +2,7 @@
 
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { HwKnob } from "./ui";
+import { HwKnob, type HwKnobMidi } from "./ui";
 
 export type EnvParams = {
   delay: number;
@@ -180,9 +180,13 @@ function traveledPath(pts: GraphGeom["pts"], play: Playhead, head: Pt): string {
 export function EnvelopePanel({
   params,
   onChange,
+  midi,
+  onGestureChange,
 }: {
   params: EnvParams;
   onChange: (next: EnvParams) => void;
+  midi?: (id: string) => HwKnobMidi;
+  onGestureChange?: (dragging: boolean) => void;
 }) {
   const [playhead, setPlayhead] = useState<Playhead | null>(null);
   const set = (patch: Partial<EnvParams>) => onChange({ ...params, ...patch });
@@ -216,6 +220,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ delay: normToTime(n) })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_delay")}
         />
         <HwKnob
           label="Attack"
@@ -225,6 +231,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ attack: normToTime(n) })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_attack")}
         />
         <HwKnob
           label="Hold"
@@ -234,6 +242,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ hold: normToTime(n) })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_hold")}
         />
         <HwKnob
           label="Decay"
@@ -243,6 +253,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ decay: normToTime(n) })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_decay")}
         />
         <HwKnob
           label="Sustain"
@@ -252,6 +264,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ sustain: n })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_sustain")}
         />
         <HwKnob
           label="Release"
@@ -261,6 +275,8 @@ export function EnvelopePanel({
           max={1}
           step={0.01}
           onChange={(n) => set({ release: normToTime(n) })}
+          onGestureChange={onGestureChange}
+          midi={midi?.("env_release")}
         />
       </div>
     </div>

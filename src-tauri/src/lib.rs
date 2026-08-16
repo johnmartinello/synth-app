@@ -4,11 +4,14 @@ mod discovery;
 mod engine;
 mod envelope;
 mod midi;
+mod midi_learn;
 mod presets;
 
 use clap_host::{HostCommand, HostStatus};
 use crossbeam_channel::Sender;
 use engine::{ArpMode, ChordType, ScaleKind, Secondary};
+use envelope::EnvelopeParams;
+use midi_learn::{LearnableParam, MidiLearnMap};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -56,7 +59,15 @@ fn get_status() -> HostStatus {
         midi_clock: false,
         filter_cutoff: 1.0,
         roll_ms: 0.0,
+        midi_learn: None,
+        midi_maps: MidiLearnMap::defaults().to_status_maps(),
+        envelope: EnvelopeParams::default(),
     })
+}
+
+fn parse_learn_param(param_id: &str) -> Result<LearnableParam, String> {
+    LearnableParam::from_id(param_id)
+        .ok_or_else(|| format!("Unknown MIDI learn parameter: {param_id}"))
 }
 
 #[tauri::command]
@@ -188,6 +199,31 @@ fn set_envelope(
     )
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn start_midi_learn(state: tauri::State<AppState>, param_id: String) -> Result<(), String> {
+    send_cmd(
+        &state,
+        HostCommand::MidiLearn {
+            param: parse_learn_param(&param_id)?,
+        },
+    )
+}
+
+#[tauri::command]
+fn cancel_midi_learn(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::MidiLearnCancel)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn unmap_midi(state: tauri::State<AppState>, param_id: String) -> Result<(), String> {
+    send_cmd(
+        &state,
+        HostCommand::MidiUnmap {
+            param: parse_learn_param(&param_id)?,
+        },
+    )
+}
+
 #[tauri::command]
 fn set_strum_mode(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetStrumMode { enabled })
@@ -280,6 +316,9 @@ pub fn run() {
             set_filter,
             set_roll,
             set_envelope,
+            start_midi_learn,
+            cancel_midi_learn,
+            unmap_midi,
             set_strum_mode,
             set_sustain,
             set_sustain_hold,
