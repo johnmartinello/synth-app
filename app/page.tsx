@@ -52,6 +52,8 @@ type LooperStatus = {
   max_mult: number;
   clock_sync: boolean;
   pending: boolean;
+  count_in?: boolean;
+  counting?: boolean;
 };
 
 type MetronomeStatus = {
@@ -69,7 +71,7 @@ const DEFAULT_METRO: MetronomeStatus = {
   bpm: 120,
   numerator: 4,
   denominator: 4,
-  subdivision: 4,
+  subdivision: 1,
   volume: 0.5,
   midi_sync: false,
 };
@@ -101,6 +103,8 @@ const DEFAULT_LOOPER: LooperStatus = {
   max_mult: 4,
   clock_sync: false,
   pending: false,
+  count_in: false,
+  counting: false,
 };
 
 type PresetInfo = {
@@ -828,7 +832,7 @@ export default function Home() {
       <section>
         <Silk className="mb-2">
           Loop{looper.clock_sync ? " · sync" : ""}
-          {looper.pending ? " · wait" : ""}
+          {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
         </Silk>
         <div className="hw-inline">
         <div>
@@ -846,13 +850,36 @@ export default function Home() {
               invoke("looper_select", { track }).catch(() => undefined);
             }}
           />
-          <HwStomp
-            mode={loopMode(looper.modes[looper.selected] ?? 0)}
-            on={looper.modes[looper.selected] === 1 || looper.modes[looper.selected] === 3}
-            onClick={() => invoke("looper_rec_play").catch(() => undefined)}
-            midi={midiFor("looper_rec_play")}
+          <HwToggle
+            on={!!looper.count_in}
+            onClick={() => {
+              const on = !looper.count_in;
+              setLooper((prev) => ({ ...prev, count_in: on }));
+              invoke("looper_count_in", { on }).catch(() => undefined);
+            }}
           >
-            {loopRecLabel(looper.modes[looper.selected] ?? 0)}
+            Count
+          </HwToggle>
+          <HwStomp
+            mode={looper.counting ? "rec" : loopRecMode(looper.modes[looper.selected] ?? 0)}
+            on={
+              looper.counting ||
+              looper.modes[looper.selected] === 1 ||
+              looper.modes[looper.selected] === 3
+            }
+            onClick={() => invoke("looper_rec").catch(() => undefined)}
+            midi={midiFor("looper_rec")}
+          >
+            Rec
+          </HwStomp>
+          <HwStomp
+            mode={looper.modes[looper.selected] === 2 ? "play" : undefined}
+            on={looper.modes[looper.selected] === 2}
+            disabled={(looper.modes[looper.selected] ?? 0) === 0}
+            onClick={() => invoke("looper_play").catch(() => undefined)}
+            midi={midiFor("looper_play")}
+          >
+            Play
           </HwStomp>
           <HwStomp
             onClick={() => invoke("looper_stop").catch(() => undefined)}
@@ -968,7 +995,7 @@ export default function Home() {
         <div
           className="loop-playhead"
           data-rec={looper.modes[looper.selected] === 1 ? "true" : undefined}
-          data-pending={looper.pending ? "true" : undefined}
+          data-pending={looper.pending || looper.counting ? "true" : undefined}
           style={{ "--pos": String(looper.playhead) } as CSSProperties}
           aria-label="Loop playhead"
         >
@@ -989,19 +1016,10 @@ export default function Home() {
   );
 }
 
-function loopMode(mode: number): "rec" | "play" | "dub" | undefined {
+function loopRecMode(mode: number): "rec" | "dub" | undefined {
   if (mode === 1) return "rec";
-  if (mode === 2) return "play";
   if (mode === 3) return "dub";
   return undefined;
-}
-
-function loopRecLabel(mode: number) {
-  if (mode === 1) return "Rec";
-  if (mode === 2) return "Play";
-  if (mode === 3) return "Dub";
-  if (mode === 4) return "Play";
-  return "Rec";
 }
 
 function unique(values: string[]) {

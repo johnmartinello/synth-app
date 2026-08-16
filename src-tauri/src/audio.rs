@@ -223,17 +223,18 @@ impl StreamAudioProcessor {
         self.generated.clear();
         while let Ok(ev) = self.engine_consumer.pop() {
             match ev {
-                EngineEvent::Looper(cmd) => self.looper.handle(cmd),
+                EngineEvent::Looper(cmd) => {
+                    self.looper.handle(cmd);
+                    self.sync_looper_clock();
+                }
                 EngineEvent::Metronome(cmd) => self.apply_metro(cmd),
                 EngineEvent::MidiClockSync { on } => {
                     self.midi_clock_on = on;
-                    if !self.metro.enabled() {
-                        self.looper.set_clock_sync(on);
-                    }
+                    self.sync_looper_clock();
                     self.engine.handle(ev, 0, &mut self.generated);
                 }
                 EngineEvent::MidiClockTick => {
-                    if !self.metro.enabled() {
+                    if !self.metro.clocking() {
                         self.looper.clock_tick();
                     }
                     self.engine.handle(ev, 0, &mut self.generated);
@@ -283,6 +284,7 @@ impl StreamAudioProcessor {
             }
             Err(e) => log::error!("Plugin process error: {e}"),
         }
+        self.sync_looper_clock();
         self.steady_counter += sample_count as u64;
         publish_sounding(&self.engine);
         publish_env(&self.engine);
@@ -291,12 +293,26 @@ impl StreamAudioProcessor {
 
     fn apply_metro(&mut self, ev: MetronomeEvent) {
         self.metro.handle(ev);
-        if self.metro.enabled() {
+        self.sync_looper_clock();
+    }
+
+    fn sync_looper_clock(&mut self) {
+        let want = self.looper.wants_count_in_clock();
+        if want && !self.metro.enabled() {
+            self.metro.start_count_in_clicks();
+        } else {
+            self.metro.stop_count_in_clicks();
+        }
+        if self.metro.enabled() || want {
             self.looper.set_clock_sync(true);
             self.looper.set_bar_frames(self.metro.bar_frames());
         } else {
             self.looper.set_clock_sync(self.midi_clock_on);
-            self.looper.set_bar_frames(0);
+            if self.looper.count_in_enabled() {
+                self.looper.set_bar_frames(self.metro.bar_frames());
+            } else {
+                self.looper.set_bar_frames(0);
+            }
         }
     }
 }
@@ -344,6 +360,8 @@ fn pack_looper(s: &LooperStatus) -> u32 {
         | (u32::from(s.max_mult & 7) << 15)
         | (u32::from(s.clock_sync) << 18)
         | (u32::from(s.pending) << 19)
+        | (u32::from(s.count_in) << 20)
+        | (u32::from(s.counting) << 21)
 }
 
 fn unpack_looper(packed: u32, playhead: f32, levels: [f32; 2]) -> LooperStatus {
@@ -366,6 +384,8 @@ fn unpack_looper(packed: u32, playhead: f32, levels: [f32; 2]) -> LooperStatus {
         },
         clock_sync: (packed >> 18) & 1 != 0,
         pending: (packed >> 19) & 1 != 0,
+        count_in: (packed >> 20) & 1 != 0,
+        counting: (packed >> 21) & 1 != 0,
     }
 }
 

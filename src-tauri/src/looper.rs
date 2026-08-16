@@ -12,7 +12,8 @@ pub const CLOCK_PULSES_PER_16TH: u8 = 6;
 /// Copy-sized command from the host/MIDI thread onto the audio thread.
 #[derive(Debug, Clone, Copy)]
 pub enum LooperEvent {
-    TapRecPlay,
+    Rec,
+    Play,
     Stop,
     Undo,
     Clear,
@@ -29,6 +30,9 @@ pub enum LooperEvent {
     },
     SetMult {
         mult: u8,
+    },
+    SetCountIn {
+        on: bool,
     },
 }
 
@@ -77,6 +81,10 @@ pub struct LooperStatus {
     pub max_mult: u8,
     pub clock_sync: bool,
     pub pending: bool,
+    #[serde(default)]
+    pub count_in: bool,
+    #[serde(default)]
+    pub counting: bool,
 }
 
 fn default_levels() -> [f32; 2] {
@@ -96,13 +104,16 @@ impl Default for LooperStatus {
             max_mult: 4,
             clock_sync: false,
             pending: false,
+            count_in: false,
+            counting: false,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingAction {
-    RecPlay,
+    Rec,
+    Play,
     Stop,
 }
 
@@ -110,6 +121,7 @@ enum PendingAction {
 enum QuantizeTo {
     Bar,
     Subdivision,
+    CountIn,
 }
 
 struct Track {
@@ -171,6 +183,9 @@ pub struct Looper {
     clock_pulses: u8,
     bar_frames: usize,
     pending: Option<(PendingAction, QuantizeTo)>,
+    count_in_enabled: bool,
+    counting: bool,
+    count_in_frames: usize,
 }
 
 impl Looper {
@@ -205,15 +220,44 @@ impl Looper {
             clock_pulses: 0,
             bar_frames: 0,
             pending: None,
+            count_in_enabled: false,
+            counting: false,
+            count_in_frames: 0,
         }
     }
 
     pub fn handle(&mut self, ev: LooperEvent) {
         match ev {
-            LooperEvent::TapRecPlay => self.queue_or_run(PendingAction::RecPlay),
-            LooperEvent::Stop => self.queue_or_run(PendingAction::Stop),
-            LooperEvent::Undo => self.undo_selected(),
-            LooperEvent::Clear => self.clear_selected(),
+            LooperEvent::Rec => {
+                if self.cancel_count_in() {
+                    return;
+                }
+                self.queue_or_run(PendingAction::Rec);
+            }
+            LooperEvent::Play => {
+                if self.is_count_in() {
+                    return;
+                }
+                self.queue_or_run(PendingAction::Play);
+            }
+            LooperEvent::Stop => {
+                if self.cancel_count_in() {
+                    return;
+                }
+                self.queue_or_run(PendingAction::Stop);
+            }
+            LooperEvent::Undo => {
+                if self.cancel_count_in() {
+                    return;
+                }
+                self.undo_selected();
+            }
+            LooperEvent::Clear => {
+                if self.cancel_count_in() {
+                    return;
+                }
+                self.clear_selected();
+            }
             LooperEvent::SelectTrack { track } => {
                 self.selected = (track as usize).min(TRACKS - 1);
             }
@@ -232,16 +276,38 @@ impl Looper {
                     }
                 }
             }
+            LooperEvent::SetCountIn { on } => {
+                self.count_in_enabled = on;
+                if !on {
+                    self.cancel_count_in();
+                }
+            }
         }
     }
 
+    pub fn count_in_enabled(&self) -> bool {
+        self.count_in_enabled
+    }
+
+    pub fn wants_count_in_clock(&self) -> bool {
+        self.is_count_in()
+    }
+
     pub fn set_clock_sync(&mut self, on: bool) {
+        if self.clock_synced == on {
+            return;
+        }
         let was = self.clock_synced;
         self.clock_synced = on;
         self.clock_pulses = 0;
         if was && !on {
-            if let Some((action, _)) = self.pending.take() {
-                self.run_pending(action);
+            if let Some((action, quant)) = self.pending.take() {
+                if matches!(quant, QuantizeTo::CountIn) {
+                    self.counting = false;
+                    self.count_in_frames = 0;
+                } else {
+                    self.run_pending(action);
+                }
             }
         }
     }
@@ -257,6 +323,9 @@ impl Looper {
         self.clock_pulses = self.clock_pulses.saturating_add(1);
         if self.clock_pulses >= CLOCK_PULSES_PER_16TH {
             self.clock_pulses = 0;
+            if let Some((_, QuantizeTo::CountIn)) = self.pending {
+                return;
+            }
             if let Some((action, _)) = self.pending.take() {
                 self.run_pending(action);
             }
@@ -275,6 +344,18 @@ impl Looper {
 
     pub fn bar_tick(&mut self) {
         if !self.clock_synced {
+            return;
+        }
+        if let Some((action, QuantizeTo::CountIn)) = self.pending {
+            if !self.counting {
+                self.counting = true;
+                self.count_in_frames = 0;
+                return;
+            }
+            self.pending = None;
+            self.counting = false;
+            self.count_in_frames = 0;
+            self.run_pending(action);
             return;
         }
         if let Some((action, QuantizeTo::Bar)) = self.pending {
@@ -306,10 +387,46 @@ impl Looper {
             max_mult: self.max_mult(),
             clock_sync: self.clock_synced,
             pending: self.pending.is_some(),
+            count_in: self.count_in_enabled,
+            counting: self.counting,
         }
     }
 
+    fn is_count_in(&self) -> bool {
+        self.counting || matches!(self.pending, Some((_, QuantizeTo::CountIn)))
+    }
+
+    fn cancel_count_in(&mut self) -> bool {
+        if !self.is_count_in() {
+            return false;
+        }
+        self.pending = None;
+        self.counting = false;
+        self.count_in_frames = 0;
+        true
+    }
+
+    fn should_count_in(&self, action: PendingAction) -> bool {
+        if action != PendingAction::Rec || !self.count_in_enabled || self.any_transporting() {
+            return false;
+        }
+        let i = self.selected;
+        if self.tracks[i].mode != TrackMode::Empty {
+            return false;
+        }
+        if i == 1 && !self.tracks[0].has_phrase() {
+            return false;
+        }
+        true
+    }
+
     fn queue_or_run(&mut self, action: PendingAction) {
+        if self.should_count_in(action) {
+            self.pending = Some((action, QuantizeTo::CountIn));
+            self.counting = false;
+            self.count_in_frames = 0;
+            return;
+        }
         if self.clock_synced {
             self.pending = Some((action, self.quantize_for(action)));
         } else {
@@ -327,9 +444,11 @@ impl Looper {
                 TrackMode::Empty | TrackMode::Recording
             );
         match action {
-            PendingAction::RecPlay if t1_first => QuantizeTo::Bar,
-            PendingAction::Stop
-                if self.selected == 0 && self.tracks[0].mode == TrackMode::Recording =>
+            PendingAction::Rec if t1_first && self.tracks[0].mode == TrackMode::Empty => {
+                QuantizeTo::Bar
+            }
+            PendingAction::Play | PendingAction::Stop
+                if t1_first && self.tracks[0].mode == TrackMode::Recording =>
             {
                 QuantizeTo::Bar
             }
@@ -339,19 +458,29 @@ impl Looper {
 
     fn run_pending(&mut self, action: PendingAction) {
         match action {
-            PendingAction::RecPlay => self.tap_rec_play(),
+            PendingAction::Rec => self.tap_rec(),
+            PendingAction::Play => self.tap_play(),
             PendingAction::Stop => self.stop_selected(),
         }
     }
 
-    fn tap_rec_play(&mut self) {
+    fn tap_rec(&mut self) {
         let i = self.selected;
         match self.tracks[i].mode {
             TrackMode::Empty => self.start_first_rec(i),
+            TrackMode::Playing | TrackMode::Stopped => self.start_overdub(i),
             TrackMode::Recording => self.finish_first_rec(i, true),
-            TrackMode::Playing => self.start_overdub(i),
+            TrackMode::Overdubbing => self.end_overdub(i),
+        }
+    }
+
+    fn tap_play(&mut self) {
+        let i = self.selected;
+        match self.tracks[i].mode {
+            TrackMode::Recording => self.finish_first_rec(i, true),
             TrackMode::Overdubbing => self.end_overdub(i),
             TrackMode::Stopped => self.start_play(i),
+            TrackMode::Empty | TrackMode::Playing => {}
         }
     }
 
@@ -611,6 +740,10 @@ impl Looper {
             }
         }
 
+        if self.counting && self.bar_frames > 0 {
+            self.count_in_frames = self.count_in_frames.saturating_add(1);
+        }
+
         if self.any_transporting() {
             self.cycle = self.cycle.saturating_add(1);
         }
@@ -697,6 +830,9 @@ impl Looper {
     }
 
     fn playhead(&self) -> f32 {
+        if self.counting && self.bar_frames > 0 {
+            return (self.count_in_frames as f32 / self.bar_frames as f32).clamp(0.0, 1.0);
+        }
         let t0 = &self.tracks[0];
         if t0.mode == TrackMode::Recording && t0.len == 0 {
             return (t0.rec_frames as f32 / self.max_frames as f32).clamp(0.0, 1.0);
@@ -757,10 +893,10 @@ mod tests {
     }
 
     fn record_t1(l: &mut Looper, frames: usize, value: f32) {
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut buf = const_stereo(frames, value);
         process(l, &mut buf);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
     }
 
     #[test]
@@ -783,11 +919,11 @@ mod tests {
     fn overdub_adds_undo_restores_redo() {
         let mut l = test_looper();
         record_t1(&mut l, 300, 0.5);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         assert_eq!(l.tracks[0].mode, TrackMode::Overdubbing);
         let mut dub = const_stereo(300, 0.4);
         process(&mut l, &mut dub);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[0].mode, TrackMode::Playing);
 
         let mut mixed = silent(300);
@@ -811,10 +947,10 @@ mod tests {
     fn overdub_mix_is_clamped() {
         let mut l = test_looper();
         record_t1(&mut l, 300, 0.8);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut dub = const_stereo(300, 0.8);
         process(&mut l, &mut dub);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         let mut out = silent(300);
         process(&mut l, &mut out);
         assert!(out.iter().all(|s| *s <= 1.0 + 1e-5 && *s >= -1.0 - 1e-5));
@@ -840,7 +976,7 @@ mod tests {
         });
         l.handle(LooperEvent::SetMult { mult: 1 });
         l.handle(LooperEvent::SelectTrack { track: 1 });
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut t2 = const_stereo(300, 0.6);
         process(&mut l, &mut t2);
         l.handle(LooperEvent::SetLevel {
@@ -857,14 +993,14 @@ mod tests {
     fn track2_locks_to_mult_and_empty_t1_is_noop() {
         let mut l = test_looper();
         l.handle(LooperEvent::SelectTrack { track: 1 });
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         assert_eq!(l.tracks[1].mode, TrackMode::Empty);
 
         l.handle(LooperEvent::SelectTrack { track: 0 });
         record_t1(&mut l, 300, 0.5);
         l.handle(LooperEvent::SetMult { mult: 2 });
         l.handle(LooperEvent::SelectTrack { track: 1 });
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         assert_eq!(l.tracks[1].mode, TrackMode::Recording);
         assert_eq!(l.tracks[1].len, 600);
         let mut buf = const_stereo(600, 0.3);
@@ -877,14 +1013,14 @@ mod tests {
     #[test]
     fn min_length_rejects_short_take() {
         let mut l = test_looper();
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut short = const_stereo(100, 0.5);
         process(&mut l, &mut short);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[0].mode, TrackMode::Recording);
         let mut rest = const_stereo(200, 0.5);
         process(&mut l, &mut rest);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[0].mode, TrackMode::Playing);
         assert_eq!(l.tracks[0].len, 300);
     }
@@ -893,7 +1029,7 @@ mod tests {
     fn clock_quantize_waits_six_ticks() {
         let mut l = test_looper();
         l.set_clock_sync(true);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         assert_eq!(l.tracks[0].mode, TrackMode::Empty);
         assert!(l.pending.is_some());
         for _ in 0..5 {
@@ -909,19 +1045,19 @@ mod tests {
     fn first_take_snaps_to_nearest_bar() {
         let mut l = test_looper();
         l.set_bar_frames(400);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut a = const_stereo(450, 0.5);
         process(&mut l, &mut a);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[0].mode, TrackMode::Playing);
         assert_eq!(l.tracks[0].len, 400);
 
         let mut l = test_looper();
         l.set_bar_frames(400);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut b = const_stereo(620, 0.5);
         process(&mut l, &mut b);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[0].mode, TrackMode::Playing);
         assert_eq!(l.tracks[0].len, 800);
     }
@@ -931,7 +1067,7 @@ mod tests {
         let mut l = test_looper();
         l.set_bar_frames(400);
         l.set_clock_sync(true);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         assert_eq!(l.tracks[0].mode, TrackMode::Empty);
         assert!(l.pending.is_some());
         l.subdivision_tick();
@@ -947,7 +1083,7 @@ mod tests {
         record_t1(&mut l, 300, 0.5);
         l.handle(LooperEvent::SetMult { mult: 1 });
         l.handle(LooperEvent::SelectTrack { track: 1 });
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut t2 = const_stereo(300, 0.2);
         process(&mut l, &mut t2);
         assert!(l.tracks[1].has_phrase());
@@ -964,11 +1100,132 @@ mod tests {
         record_t1(&mut l, 300, 0.5);
         l.handle(LooperEvent::SetMult { mult: 2 });
         l.handle(LooperEvent::SelectTrack { track: 1 });
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Rec);
         let mut buf = const_stereo(300, 0.3);
         process(&mut l, &mut buf);
-        l.handle(LooperEvent::TapRecPlay);
+        l.handle(LooperEvent::Play);
         assert_eq!(l.tracks[1].mode, TrackMode::Playing);
         assert_eq!(l.tracks[1].len, 600);
+    }
+
+    #[test]
+    fn rec_closes_take_and_overdub() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::Rec);
+        let mut buf = const_stereo(300, 0.5);
+        process(&mut l, &mut buf);
+        l.handle(LooperEvent::Rec);
+        assert_eq!(l.tracks[0].mode, TrackMode::Playing);
+        l.handle(LooperEvent::Play);
+        assert_eq!(l.tracks[0].mode, TrackMode::Playing);
+        l.handle(LooperEvent::Rec);
+        assert_eq!(l.tracks[0].mode, TrackMode::Overdubbing);
+        l.handle(LooperEvent::Rec);
+        assert_eq!(l.tracks[0].mode, TrackMode::Playing);
+    }
+
+    #[test]
+    fn count_in_two_bar_ticks_starts_rec() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(400);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        assert!(!l.counting);
+        assert!(l.wants_count_in_clock());
+        l.subdivision_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        l.bar_tick();
+        assert!(l.counting);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        l.bar_tick();
+        assert!(!l.counting);
+        assert_eq!(l.tracks[0].mode, TrackMode::Recording);
+        assert!(!l.wants_count_in_clock());
+    }
+
+    #[test]
+    fn rec_during_count_in_cancels() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(400);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        l.bar_tick();
+        assert!(l.counting);
+        l.handle(LooperEvent::Rec);
+        assert!(!l.counting);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        assert!(!l.wants_count_in_clock());
+    }
+
+    #[test]
+    fn stop_and_undo_cancel_count_in() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(400);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        l.bar_tick();
+        l.handle(LooperEvent::Stop);
+        assert!(!l.counting);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+
+        l.handle(LooperEvent::Rec);
+        l.bar_tick();
+        l.handle(LooperEvent::Undo);
+        assert!(!l.counting);
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+    }
+
+    #[test]
+    fn count_in_skipped_when_t1_playing() {
+        let mut l = test_looper();
+        record_t1(&mut l, 300, 0.5);
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.handle(LooperEvent::SelectTrack { track: 1 });
+        l.handle(LooperEvent::Rec);
+        assert_eq!(l.tracks[1].mode, TrackMode::Recording);
+        assert!(!l.counting);
+        assert!(!l.wants_count_in_clock());
+    }
+
+    #[test]
+    fn count_in_uses_bar_ticks_not_fixed_beats() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(300);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        l.bar_tick();
+        l.bar_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Recording);
+
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(800);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        l.bar_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        l.bar_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Recording);
+    }
+
+    #[test]
+    fn midi_clock_does_not_fire_count_in() {
+        let mut l = test_looper();
+        l.handle(LooperEvent::SetCountIn { on: true });
+        l.set_bar_frames(400);
+        l.set_clock_sync(true);
+        l.handle(LooperEvent::Rec);
+        for _ in 0..12 {
+            l.clock_tick();
+        }
+        assert_eq!(l.tracks[0].mode, TrackMode::Empty);
+        l.bar_tick();
+        l.bar_tick();
+        assert_eq!(l.tracks[0].mode, TrackMode::Recording);
     }
 }

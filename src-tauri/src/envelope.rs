@@ -361,9 +361,12 @@ impl AmpEnvelope {
     fn start_from_delay(&mut self) {
         self.pending_note_on = true;
         self.pending_note_off = false;
+        let retrigger = self.stage == EnvStage::Release;
         let dur = self.sec_samples(self.params.delay);
-        if dur == 0 {
-            self.level = 0.0;
+        if dur == 0 || retrigger {
+            if !retrigger {
+                self.level = 0.0;
+            }
             self.enter_attack();
             return;
         }
@@ -586,5 +589,59 @@ mod tests {
         assert_eq!(env.level(), 1.0);
         assert_eq!(env.gate_off(), Some(0));
         assert!(env.is_idle());
+    }
+
+    #[test]
+    fn retrigger_from_release_keeps_level() {
+        let mut env = env_at(
+            1_000.0,
+            EnvelopeParams {
+                delay: 0.0,
+                attack: 0.1,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.2,
+            },
+        );
+        env.gate_on();
+        env.advance(100);
+        assert_eq!(env.stage(), EnvStage::Sustain);
+        env.gate_off();
+        env.advance(100);
+        let before = env.level();
+        assert!(before > 0.4 && before < 0.6, "mid-release level was {before}");
+        env.gate_on();
+        assert_eq!(env.stage(), EnvStage::Attack);
+        assert!((env.level() - before).abs() < 1e-5);
+        let tick = env.advance(50);
+        assert!(tick.start_gain >= before - 1e-5);
+        assert!(tick.end_gain > tick.start_gain);
+    }
+
+    #[test]
+    fn retrigger_from_release_skips_delay() {
+        let mut env = env_at(
+            1_000.0,
+            EnvelopeParams {
+                delay: 0.1,
+                attack: 0.1,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.2,
+            },
+        );
+        env.gate_on();
+        env.advance(200);
+        assert_eq!(env.stage(), EnvStage::Sustain);
+        env.gate_off();
+        env.advance(100);
+        let before = env.level();
+        assert!(before > 0.4);
+        assert_eq!(env.gate_on(), Some(0));
+        assert_eq!(env.stage(), EnvStage::Attack);
+        assert!((env.level() - before).abs() < 1e-5);
+        assert!(!env.awaiting_note_on());
     }
 }

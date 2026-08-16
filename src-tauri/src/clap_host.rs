@@ -287,7 +287,8 @@ pub enum HostCommand {
     MidiUnmap {
         param: LearnableParam,
     },
-    LooperRecPlay,
+    LooperRec,
+    LooperPlay,
     LooperStop,
     LooperUndo,
     LooperClear,
@@ -304,6 +305,9 @@ pub enum HostCommand {
     },
     LooperMult {
         mult: u8,
+    },
+    LooperCountIn {
+        on: bool,
     },
     SetMetronome {
         enabled: bool,
@@ -374,6 +378,7 @@ struct LooperSettings {
     muted: [bool; 2],
     levels: [f32; 2],
     mult: u8,
+    count_in: bool,
 }
 
 impl Default for LooperSettings {
@@ -383,6 +388,7 @@ impl Default for LooperSettings {
             muted: [false, false],
             levels: [1.0, 1.0],
             mult: 1,
+            count_in: false,
         }
     }
 }
@@ -406,7 +412,7 @@ impl Default for MetronomeSettings {
             live_bpm: 120.0,
             numerator: 4,
             denominator: 4,
-            subdivision: 4,
+            subdivision: 1,
             volume: 0.5,
             midi_sync: false,
         }
@@ -530,6 +536,8 @@ fn emit_looper_ui(app: &AppHandle, last: &mut u64, status: &mut HostStatus) {
         | (u64::from(snap.has_phrase[1]) << 21)
         | ((u64::from(snap.mult) & 7) << 22)
         | (u64::from(snap.pending) << 25)
+        | (u64::from(snap.count_in) << 40)
+        | (u64::from(snap.counting) << 41)
         | (((snap.levels[0].clamp(0.0, 1.0) * 127.0).round() as u64) << 26)
         | (((snap.levels[1].clamp(0.0, 1.0) * 127.0).round() as u64) << 33);
     if packed == *last {
@@ -549,6 +557,7 @@ fn copy_looper_controls(status: &mut HostStatus, settings: &LooperSettings) {
     status.looper.muted = settings.muted;
     status.looper.levels = settings.levels;
     status.looper.mult = settings.mult;
+    status.looper.count_in = settings.count_in;
 }
 
 fn copy_metro(status: &mut HostStatus, metro: &MetronomeSettings) {
@@ -1336,7 +1345,8 @@ fn fire_looper_trigger(
     prod: &mut Producer<EngineEvent>,
 ) {
     match param {
-        LearnableParam::LooperRecPlay => push_looper(prod, LooperEvent::TapRecPlay),
+        LearnableParam::LooperRec => push_looper(prod, LooperEvent::Rec),
+        LearnableParam::LooperPlay => push_looper(prod, LooperEvent::Play),
         LearnableParam::LooperStop => push_looper(prod, LooperEvent::Stop),
         LearnableParam::LooperUndo => push_looper(prod, LooperEvent::Undo),
         LearnableParam::LooperMute => {
@@ -1417,7 +1427,8 @@ fn apply_learned_param(
             );
             copy_looper_controls(status, looper);
         }
-        LearnableParam::LooperRecPlay
+        LearnableParam::LooperRec
+        | LearnableParam::LooperPlay
         | LearnableParam::LooperStop
         | LearnableParam::LooperUndo
         | LearnableParam::LooperMute => {}
@@ -1821,8 +1832,11 @@ fn handle_command(
             }
             emit_status(app, status);
         }
-        HostCommand::LooperRecPlay => {
-            push_looper(prod, LooperEvent::TapRecPlay);
+        HostCommand::LooperRec => {
+            push_looper(prod, LooperEvent::Rec);
+        }
+        HostCommand::LooperPlay => {
+            push_looper(prod, LooperEvent::Play);
         }
         HostCommand::LooperStop => {
             push_looper(prod, LooperEvent::Stop);
@@ -1872,6 +1886,12 @@ fn handle_command(
                 copy_looper_controls(status, looper);
                 emit_status(app, status);
             }
+        }
+        HostCommand::LooperCountIn { on } => {
+            looper.count_in = on;
+            push_looper(prod, LooperEvent::SetCountIn { on });
+            copy_looper_controls(status, looper);
+            emit_status(app, status);
         }
         HostCommand::SetMetronome {
             enabled,

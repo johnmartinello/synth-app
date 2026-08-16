@@ -1846,4 +1846,52 @@ mod tests {
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         assert_eq!(offs, vec![60, 64, 67]);
     }
+
+    #[test]
+    fn chord_on_during_release_keeps_env_level() {
+        let mut eng = AudioEngine::new(1_000.0);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.0,
+                attack: 0.1,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.2,
+            },
+            0,
+            &mut out,
+        );
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        eng.process_clock(100, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        eng.process_clock(100, &mut out);
+        let level_before = eng.env_playhead().2;
+        assert!(
+            level_before > 0.3,
+            "expected mid-release gain, got {level_before}"
+        );
+        let mut next = [0u8; MAX_CHORD_NOTES];
+        next[0] = 62;
+        next[1] = 65;
+        next[2] = 69;
+        out.clear();
+        eng.handle(
+            EngineEvent::ChordOn {
+                notes: next,
+                len: 3,
+            },
+            0,
+            &mut out,
+        );
+        let level_after = eng.env_playhead().2;
+        assert!(
+            level_after > 0.3,
+            "retrigger must not snap gain to 0, got {level_after}"
+        );
+        assert!((level_after - level_before).abs() < 1e-5);
+    }
 }

@@ -90,7 +90,7 @@ impl Default for MetronomeStatus {
             bpm: 120.0,
             numerator: 4,
             denominator: 4,
-            subdivision: 4,
+            subdivision: 1,
             volume: 0.5,
             midi_sync: false,
         }
@@ -140,6 +140,7 @@ pub struct Metronome {
     click_inc: f32,
     click_amp: f32,
     click_coeff: f32,
+    count_in_clicks: bool,
 }
 
 impl Metronome {
@@ -152,7 +153,7 @@ impl Metronome {
             bpm: 120.0,
             numerator: 4,
             denominator: 4,
-            subdivision: Subdivision::Sixteenth,
+            subdivision: Subdivision::Quarter,
             volume: 0.5,
             phase: 0.0,
             click_env: 0.0,
@@ -160,11 +161,30 @@ impl Metronome {
             click_inc: 0.0,
             click_amp: 0.0,
             click_coeff,
+            count_in_clicks: false,
         }
     }
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn clocking(&self) -> bool {
+        self.enabled || self.count_in_clicks
+    }
+
+    pub fn start_count_in_clicks(&mut self) {
+        if self.enabled {
+            return;
+        }
+        if !self.count_in_clicks {
+            self.count_in_clicks = true;
+            self.phase = 0.0;
+        }
+    }
+
+    pub fn stop_count_in_clicks(&mut self) {
+        self.count_in_clicks = false;
     }
 
     pub fn bar_frames(&self) -> usize {
@@ -207,7 +227,7 @@ impl Metronome {
         n_frames: usize,
         out: &mut [(usize, GridKind); MAX_GRID_EVENTS],
     ) -> usize {
-        if !self.enabled || n_frames == 0 {
+        if !self.clocking() || n_frames == 0 {
             return 0;
         }
         let bar = self.samples_per_bar();
@@ -239,7 +259,7 @@ impl Metronome {
 
     pub fn mix_and_advance(&mut self, frames: &mut [f32], channels: usize) {
         let step = channels.max(1);
-        if !self.enabled || frames.len() < step {
+        if !self.clocking() || frames.len() < step {
             self.advance_phase(frames.len() / step);
             return;
         }
@@ -339,7 +359,7 @@ pub fn process_looper_with_metro(
     buf: &mut [f32],
     channels: usize,
 ) {
-    if !metro.enabled() {
+    if !metro.clocking() {
         looper.process_interleaved(buf, channels);
         return;
     }
@@ -382,6 +402,32 @@ mod tests {
     #[test]
     fn bar_frames_6_8_120_at_48k() {
         assert_eq!(bar_frames(48_000.0, 120.0, 6, 8), 72_000);
+    }
+
+    #[test]
+    fn bar_frames_3_4_120_at_48k() {
+        assert_eq!(bar_frames(48_000.0, 120.0, 3, 4), 72_000);
+        assert_ne!(bar_frames(48_000.0, 120.0, 3, 4), bar_frames(48_000.0, 120.0, 4, 4));
+    }
+
+    #[test]
+    fn count_in_clicks_clock_without_metro_enabled() {
+        let mut m = Metronome::new(1_000.0);
+        m.handle(MetronomeEvent::SetSubdivision { sub: 1 });
+        m.handle(MetronomeEvent::SetVolume { norm: 1.0 });
+        m.start_count_in_clicks();
+        assert!(m.clocking());
+        assert!(!m.enabled());
+        let mut ev = [(0usize, GridKind::Subdivision); MAX_GRID_EVENTS];
+        let n = m.peek_grid_events(200, &mut ev);
+        assert!(n >= 1);
+        assert_eq!(ev[0], (0, GridKind::Bar));
+        let mut buf = vec![0.0f32; 2_000 * 2];
+        m.mix_and_advance(&mut buf, 2);
+        let head: f32 = buf[..16].iter().map(|s| s.abs()).sum();
+        assert!(head > 0.5, "count-in downbeat energy {head}");
+        m.stop_count_in_clicks();
+        assert!(!m.clocking());
     }
 
     #[test]

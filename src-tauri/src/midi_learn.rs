@@ -32,7 +32,8 @@ pub enum LearnableParam {
     EnvDecay,
     EnvSustain,
     EnvRelease,
-    LooperRecPlay,
+    LooperRec,
+    LooperPlay,
     LooperStop,
     LooperUndo,
     LooperMute,
@@ -52,7 +53,8 @@ impl LearnableParam {
             Self::EnvDecay => "env_decay",
             Self::EnvSustain => "env_sustain",
             Self::EnvRelease => "env_release",
-            Self::LooperRecPlay => "looper_rec_play",
+            Self::LooperRec => "looper_rec",
+            Self::LooperPlay => "looper_play",
             Self::LooperStop => "looper_stop",
             Self::LooperUndo => "looper_undo",
             Self::LooperMute => "looper_mute",
@@ -72,7 +74,8 @@ impl LearnableParam {
             "env_decay" => Some(Self::EnvDecay),
             "env_sustain" => Some(Self::EnvSustain),
             "env_release" => Some(Self::EnvRelease),
-            "looper_rec_play" => Some(Self::LooperRecPlay),
+            "looper_rec" | "looper_rec_play" => Some(Self::LooperRec),
+            "looper_play" => Some(Self::LooperPlay),
             "looper_stop" => Some(Self::LooperStop),
             "looper_undo" => Some(Self::LooperUndo),
             "looper_mute" => Some(Self::LooperMute),
@@ -97,7 +100,11 @@ impl LearnableParam {
     pub fn is_trigger(self) -> bool {
         matches!(
             self,
-            Self::LooperRecPlay | Self::LooperStop | Self::LooperUndo | Self::LooperMute
+            Self::LooperRec
+                | Self::LooperPlay
+                | Self::LooperStop
+                | Self::LooperUndo
+                | Self::LooperMute
         )
     }
 }
@@ -192,7 +199,8 @@ pub fn cc_to_value(param: LearnableParam, val: u8) -> f32 {
         | LearnableParam::EnvSustain
         | LearnableParam::LooperLevel1
         | LearnableParam::LooperLevel2 => n,
-        LearnableParam::LooperRecPlay
+        LearnableParam::LooperRec
+        | LearnableParam::LooperPlay
         | LearnableParam::LooperStop
         | LearnableParam::LooperUndo
         | LearnableParam::LooperMute => 0.0,
@@ -484,7 +492,8 @@ mod tests {
         assert!((cc_to_value(LearnableParam::EnvSustain, 64) - 64.0 / 127.0).abs() < 1e-5);
         assert!((cc_to_value(LearnableParam::LooperLevel1, 127) - 1.0).abs() < 1e-5);
         assert!((cc_to_value(LearnableParam::LooperLevel2, 0)).abs() < 1e-5);
-        assert!(LearnableParam::LooperRecPlay.is_trigger());
+        assert!(LearnableParam::LooperRec.is_trigger());
+        assert!(LearnableParam::LooperPlay.is_trigger());
         assert!(!LearnableParam::LooperLevel1.is_trigger());
     }
 
@@ -509,14 +518,14 @@ mod tests {
         assert!(learn.try_learn(MidiSource::mmc(2)).is_none());
         assert_eq!(learn.armed, Some(LearnableParam::Filter));
 
-        learn.arm(LearnableParam::LooperRecPlay);
+        learn.arm(LearnableParam::LooperRec);
         assert_eq!(
             learn.try_learn(MidiSource::mmc(6)),
-            Some(LearnableParam::LooperRecPlay)
+            Some(LearnableParam::LooperRec)
         );
         assert_eq!(
             learn.map.param_for(MidiSource::mmc(6)),
-            Some(LearnableParam::LooperRecPlay)
+            Some(LearnableParam::LooperRec)
         );
         assert_eq!(MidiSource::mmc(6).label(), "Rec");
         assert_eq!(MidiSource::mmc(2).label(), "Play");
@@ -529,10 +538,10 @@ mod tests {
         let mut map = MidiLearnMap::empty();
         assert!(map.bind(LearnableParam::LooperStop, MidiSource::cc(102)));
         assert!(!map.bind(LearnableParam::Filter, MidiSource::cc(102)));
-        assert!(map.bind(LearnableParam::LooperRecPlay, MidiSource::cc(103)));
+        assert!(map.bind(LearnableParam::LooperRec, MidiSource::cc(103)));
         assert_eq!(
             map.param_for(MidiSource::cc(103)),
-            Some(LearnableParam::LooperRecPlay)
+            Some(LearnableParam::LooperRec)
         );
     }
 
@@ -591,7 +600,8 @@ mod tests {
             LearnableParam::EnvDecay,
             LearnableParam::EnvSustain,
             LearnableParam::EnvRelease,
-            LearnableParam::LooperRecPlay,
+            LearnableParam::LooperRec,
+            LearnableParam::LooperPlay,
             LearnableParam::LooperStop,
             LearnableParam::LooperUndo,
             LearnableParam::LooperMute,
@@ -600,6 +610,7 @@ mod tests {
         ] {
             assert_eq!(LearnableParam::from_id(param.as_id()), Some(param));
         }
+        assert_eq!(LearnableParam::from_id("looper_rec_play"), Some(LearnableParam::LooperRec));
         assert_eq!(LearnableParam::from_id("nope"), None);
     }
 }

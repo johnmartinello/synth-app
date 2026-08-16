@@ -231,8 +231,13 @@ fn unmap_midi(state: tauri::State<AppState>, param_id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn looper_rec_play(state: tauri::State<AppState>) -> Result<(), String> {
-    send_cmd(&state, HostCommand::LooperRecPlay)
+fn looper_rec(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperRec)
+}
+
+#[tauri::command]
+fn looper_play(state: tauri::State<AppState>) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperPlay)
 }
 
 #[tauri::command]
@@ -268,6 +273,11 @@ fn looper_level(state: tauri::State<AppState>, track: u8, value: f32) -> Result<
 #[tauri::command]
 fn looper_mult(state: tauri::State<AppState>, mult: u8) -> Result<(), String> {
     send_cmd(&state, HostCommand::LooperMult { mult })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn looper_count_in(state: tauri::State<AppState>, on: bool) -> Result<(), String> {
+    send_cmd(&state, HostCommand::LooperCountIn { on })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -388,7 +398,8 @@ pub fn run() {
             start_midi_learn,
             cancel_midi_learn,
             unmap_midi,
-            looper_rec_play,
+            looper_rec,
+            looper_play,
             looper_stop,
             looper_undo,
             looper_clear,
@@ -396,6 +407,7 @@ pub fn run() {
             looper_mute,
             looper_level,
             looper_mult,
+            looper_count_in,
             set_metronome,
             set_strum_mode,
             set_sustain,
