@@ -197,7 +197,7 @@ export function HwKnob({
   onChange,
   onGestureChange,
 }: {
-  label: string;
+  label?: string;
   display?: string;
   value: number;
   min: number;
@@ -219,13 +219,13 @@ export function HwKnob({
 
   return (
     <div className="hw-knob">
-      <Silk>{label}</Silk>
+      {label ? <Silk>{label}</Silk> : null}
       <div
         id={id}
         className="hw-knob-face"
         role="slider"
         tabIndex={0}
-        aria-label={label}
+        aria-label={label ?? display ?? "Knob"}
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={value}

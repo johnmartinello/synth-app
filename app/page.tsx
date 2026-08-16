@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
 import { HwButton, HwKnob, HwMenu, HwToggle, HwToggleGroup, Silk } from "./ui";
 
 type DiscoveryReport = {
@@ -129,7 +130,7 @@ export default function Home() {
   const [filter, setFilter] = useState(1);
   const [rollMs, setRollMs] = useState(0);
   const [strumMode, setStrumMode] = useState(false);
-  const [sustain, setSustain] = useState(false);
+  const [env, setEnv] = useState<EnvParams>(DEFAULT_ENV);
   const [engineNotes, setEngineNotes] = useState<number[] | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const autoMidiRef = useRef(false);
@@ -273,12 +274,12 @@ export default function Home() {
   }, [strumMode]);
 
   useEffect(() => {
-    invoke("set_sustain", { enabled: sustain }).catch(() => undefined);
-  }, [sustain]);
-
-  useEffect(() => {
     invoke("set_roll", { ms: rollMs }).catch(() => undefined);
   }, [rollMs]);
+
+  useEffect(() => {
+    invoke("set_envelope", env).catch(() => undefined);
+  }, [env]);
 
   useEffect(() => {
     if (autoMidiRef.current || !ports.length || status?.midi_port) {
@@ -441,9 +442,6 @@ export default function Home() {
           ]}
           onChange={(v) => setScale(v as "major" | "minor")}
         />
-        <HwToggle on={sustain || !!status?.sustain} onClick={() => setSustain((v) => !v)}>
-          Sustain
-        </HwToggle>
       </section>
 
       <section className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2">
@@ -490,32 +488,35 @@ export default function Home() {
         />
       </section>
 
-      <section className="mb-4 grid flex-1 grid-cols-7 gap-1.5">
-        {DEGREES.map((d) => {
-          const on = held.has(d.n);
-          return (
-            <button
-              key={d.n}
-              type="button"
-              className="hw-pad"
-              data-on={on ? "true" : undefined}
-              data-armed={armed === d.n ? "true" : undefined}
-              onPointerDown={(e) => {
-                e.currentTarget.setPointerCapture(e.pointerId);
-                padDown(d.n);
-              }}
-              onPointerUp={() => padUp(d.n)}
-              onPointerCancel={() => padUp(d.n)}
-            >
-              <span className="silk opacity-70">
-                {d.n}/{padRoman(d.n, scale, secondary)}
-              </span>
-              <span className="text-3xl font-semibold">
-                {chordSymbol(root, scale, chordType, secondary, d.n)}
-              </span>
-            </button>
-          );
-        })}
+      <section className="mb-4 grid gap-2 lg:grid-cols-[55fr_45fr] lg:items-stretch">
+        <div className="grid grid-cols-7 gap-1.5">
+          {DEGREES.map((d) => {
+            const on = held.has(d.n);
+            return (
+              <button
+                key={d.n}
+                type="button"
+                className="hw-pad"
+                data-on={on ? "true" : undefined}
+                data-armed={armed === d.n ? "true" : undefined}
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  padDown(d.n);
+                }}
+                onPointerUp={() => padUp(d.n)}
+                onPointerCancel={() => padUp(d.n)}
+              >
+                <span className="silk opacity-70">
+                  {d.n}/{padRoman(d.n, scale, secondary)}
+                </span>
+                <span className="text-lg font-semibold leading-tight">
+                  {chordSymbol(root, scale, chordType, secondary, d.n)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <EnvelopePanel params={env} onChange={setEnv} />
       </section>
 
       <section className="mb-4 grid items-center gap-x-4 gap-y-2 lg:grid-cols-[minmax(0,1fr)_16rem]">
@@ -539,71 +540,65 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-[1fr_1.2fr]">
-        <div>
-          <Silk className="mb-2">Arp</Silk>
-          <div className="flex flex-wrap items-center gap-3">
-            <HwToggle on={arpOn} onClick={() => setArpOn((v) => !v)}>
-              On
-            </HwToggle>
-            <HwToggle on={arpLatch} onClick={() => setArpLatch((v) => !v)}>
-              Latch
-            </HwToggle>
-            <HwToggleGroup
-              value={arpMode}
-              options={[
-                ["up", "Up"],
-                ["down", "Dn"],
-                ["up-down", "U/D"],
-              ]}
-              onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
-            />
-          </div>
-          <div className="hw-knobs">
-            <HwKnob
-              label="Rate"
-              display={`${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
-              value={arpRate}
-              min={1}
-              max={16}
-              step={0.5}
-              onChange={setArpRate}
-              onGestureChange={(on) => {
-                rateGesture.current = on;
-              }}
-            />
-            <HwKnob
-              label="Filter"
-              display={`${Math.round(filter * 100)}`}
-              value={filter}
-              min={0}
-              max={1}
-              step={0.01}
-              onChange={(v) => {
-                setFilter(v);
-                invoke("set_filter", { value: v }).catch(() => undefined);
-              }}
-              onGestureChange={(on) => {
-                filterGesture.current = on;
-              }}
-            />
-            <HwKnob
-              label="Roll"
-              display={`${Math.round(rollMs)} ms`}
-              value={rollMs}
-              min={0}
-              max={150}
-              step={1}
-              onChange={setRollMs}
-              onGestureChange={(on) => {
-                rollGesture.current = on;
-              }}
-            />
-          </div>
+      <section>
+        <Silk className="mb-2">Arp</Silk>
+        <div className="flex flex-wrap items-center gap-3">
+          <HwToggle on={arpOn} onClick={() => setArpOn((v) => !v)}>
+            On
+          </HwToggle>
+          <HwToggle on={arpLatch} onClick={() => setArpLatch((v) => !v)}>
+            Latch
+          </HwToggle>
+          <HwToggleGroup
+            value={arpMode}
+            options={[
+              ["up", "Up"],
+              ["down", "Dn"],
+              ["up-down", "U/D"],
+            ]}
+            onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
+          />
         </div>
-        <div>
-          <Silk className="mb-2">Chromatic</Silk>
-          <MiniKeys />
+        <div className="hw-knobs">
+          <HwKnob
+            label="Rate"
+            display={`${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
+            value={arpRate}
+            min={1}
+            max={16}
+            step={0.5}
+            onChange={setArpRate}
+            onGestureChange={(on) => {
+              rateGesture.current = on;
+            }}
+          />
+          <HwKnob
+            label="Filter"
+            display={`${Math.round(filter * 100)}`}
+            value={filter}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => {
+              setFilter(v);
+              invoke("set_filter", { value: v }).catch(() => undefined);
+            }}
+            onGestureChange={(on) => {
+              filterGesture.current = on;
+            }}
+          />
+          <HwKnob
+            label="Roll"
+            display={`${Math.round(rollMs)} ms`}
+            value={rollMs}
+            min={0}
+            max={150}
+            step={1}
+            onChange={setRollMs}
+            onGestureChange={(on) => {
+              rollGesture.current = on;
+            }}
+          />
         </div>
       </section>
 
@@ -874,8 +869,9 @@ function ConfigModal({
           <p className="mt-2 text-[11px] leading-4 text-[var(--muted)]">
             The first hardware input is opened on launch. White keys in any
             octave = chords 1–7; Oct− / Oct+ on a controller shifts the chord
-            octave. Other notes are chromatic. Sustain pedal (CC64) and Space
-            hold notes. In strum mode, the mod touchbar (CC1) sweeps the
+            octave. Other notes are chromatic. The Env sustain knob is the
+            hold level; Space and the sustain pedal (CC64) keep the gate
+            open. In strum mode, the mod touchbar (CC1) sweeps the
             strings. Arp button (CC102) toggles arp. Rate follows MIDI clock.
             Filter (CC74) is a low-pass on the output. Roll staggers block chords.
           </p>
@@ -1006,28 +1002,6 @@ function StatusLed({ status }: { status: HostStatus | null }) {
   );
 }
 
-function MiniKeys() {
-  const whites = [60, 62, 64, 65, 67, 69, 71, 72];
-  return (
-    <div className="flex gap-1">
-      {whites.map((key, i) => (
-        <button
-          key={key}
-          type="button"
-          className="hw-key"
-          onPointerDown={(e) => {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            invoke("note_on", { key, vel: 100 });
-          }}
-          onPointerUp={() => invoke("note_off", { key })}
-        >
-          {["C", "D", "E", "F", "G", "A", "B", "C"][i]}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function midiToName(midi: number) {
@@ -1145,10 +1119,8 @@ function chordSymbol(
   return `${name}${ext}`;
 }
 
-function stringColor(index: number, count: number) {
-  const t = count <= 1 ? 0.5 : index / (count - 1);
-  const hue = 328 - t * 48;
-  return `hsl(${hue} 78% 64%)`;
+function stringColor(_index: number, _count: number) {
+  return "#f6f2e8";
 }
 
 function stringCenterX(index: number, count: number) {
@@ -1371,12 +1343,12 @@ function StrumPlate({
         ctx.lineWidth = width;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
-        ctx.shadowColor = color;
+        ctx.shadowColor = "#f6f2e8";
         ctx.shadowBlur = glow > 0.12 || st.amp > 0.12 ? 8 + glow * 14 + st.amp * 10 : 0;
         ctx.stroke();
         ctx.shadowBlur = 0;
-        ctx.strokeStyle = "#fff8f0";
-        ctx.globalAlpha = opacity * 0.35;
+        ctx.strokeStyle = "#fffef8";
+        ctx.globalAlpha = opacity * 0.42;
         ctx.lineWidth = Math.max(0.55, width * 0.32);
         ctx.stroke();
       }

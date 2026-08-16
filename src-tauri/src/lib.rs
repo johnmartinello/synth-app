@@ -2,6 +2,7 @@ mod audio;
 mod clap_host;
 mod discovery;
 mod engine;
+mod envelope;
 mod midi;
 mod presets;
 
@@ -165,6 +166,29 @@ fn set_roll(state: tauri::State<AppState>, ms: f32) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_envelope(
+    state: tauri::State<AppState>,
+    delay: f32,
+    attack: f32,
+    hold: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+) -> Result<(), String> {
+    send_cmd(
+        &state,
+        HostCommand::SetEnvelope {
+            delay,
+            attack,
+            hold,
+            decay,
+            sustain,
+            release,
+        },
+    )
+}
+
+#[tauri::command]
 fn set_strum_mode(state: tauri::State<AppState>, enabled: bool) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetStrumMode { enabled })
 }
@@ -255,6 +279,7 @@ pub fn run() {
             set_arp,
             set_filter,
             set_roll,
+            set_envelope,
             set_strum_mode,
             set_sustain,
             set_sustain_hold,

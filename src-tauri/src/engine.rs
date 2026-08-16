@@ -107,6 +107,14 @@ pub enum EngineEvent {
     RollSet {
         ms_x10: u16,
     },
+    SetEnvelope {
+        delay: f32,
+        attack: f32,
+        hold: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+    },
 }
 
 /// Control-surface snapshot for the UI.
@@ -298,6 +306,11 @@ pub struct AudioEngine {
     roll_key: [u8; MAX_CHORD_NOTES],
     roll_vel: [u8; MAX_CHORD_NOTES],
     roll_len: u8,
+    env: crate::envelope::AmpEnvelope,
+    chord_gate: bool,
+    chromatic_held: u8,
+    delayed_chord: Option<([u8; MAX_CHORD_NOTES], u8)>,
+    env_releasing: bool,
 }
 
 mod heapless_notes {
@@ -366,6 +379,10 @@ impl AudioEngine {
         self.sounding.mask()
     }
 
+    pub fn env_playhead(&self) -> (u8, f32, f32) {
+        self.env.playhead()
+    }
+
     pub fn new(sample_rate: f64) -> Self {
         Self {
             sample_rate: sample_rate.max(1.0),
@@ -398,6 +415,11 @@ impl AudioEngine {
             roll_key: [0; MAX_CHORD_NOTES],
             roll_vel: [0; MAX_CHORD_NOTES],
             roll_len: 0,
+            env: crate::envelope::AmpEnvelope::new(sample_rate),
+            chord_gate: false,
+            chromatic_held: 0,
+            delayed_chord: None,
+            env_releasing: false,
         }
     }
 
@@ -405,14 +427,41 @@ impl AudioEngine {
         match ev {
             EngineEvent::ChromaticOn { key, vel } => {
                 if !self.strum_mode {
+                    self.chromatic_held = self.chromatic_held.saturating_add(1);
+                    let _ = self.env.gate_on();
+                    self.env_releasing = false;
                     self.note_on(time, key, vel, out);
                 }
             }
-            EngineEvent::ChromaticOff { key } => self.note_off(time, key, out),
+            EngineEvent::ChromaticOff { key } => {
+                self.chromatic_held = self.chromatic_held.saturating_sub(1);
+                self.note_off(time, key, out);
+                if self.chromatic_held == 0 && !self.chord_gate {
+                    self.begin_env_release(time, out);
+                }
+            }
             EngineEvent::Panic => self.panic(time, out),
             EngineEvent::ChordOn { notes, len } => {
                 let new_len = len.min(MAX_CHORD_NOTES as u8);
                 let new_notes = notes;
+                self.chord_gate = true;
+                self.env_releasing = false;
+                let note_on_now = self.env.gate_on();
+                let delayed = note_on_now.is_none() && self.env.awaiting_note_on();
+                if delayed && !self.strum_mode {
+                    if self.block_chord_on {
+                        self.release_block(time, out, true);
+                    }
+                    if let Some(key) = self.arp_note.take() {
+                        self.note_cut(time, key, out);
+                    }
+                    self.delayed_chord = Some((new_notes, new_len));
+                    self.last_chord = new_notes;
+                    self.last_chord_len = new_len;
+                    self.chord_latched = self.arp_latch;
+                    return;
+                }
+                self.delayed_chord = None;
                 if self.strum_mode {
                     if let Some(key) = self.arp_note.take() {
                         self.note_cut(time, key, out);
@@ -439,11 +488,14 @@ impl AudioEngine {
                 }
             }
             EngineEvent::ChordOff => {
+                self.chord_gate = false;
+                self.delayed_chord = None;
                 if self.arp_enabled && self.arp_latch {
                     self.chord_latched = true;
                     return;
                 }
                 if self.strum_mode {
+                    let _ = self.env.gate_off();
                     if self.strum_mask != 0 {
                         self.apply_strum_mask(time, 0, 0, out);
                     }
@@ -451,7 +503,17 @@ impl AudioEngine {
                     self.chord_latched = false;
                     return;
                 }
-                // Cut the current arp note immediately so release stops the pattern.
+                if self.sustain {
+                    let _ = self.env.gate_off();
+                    self.release_pattern(time, out, self.arp_enabled);
+                    self.chord_len = 0;
+                    self.chord_latched = false;
+                    return;
+                }
+                if self.begin_env_release(time, out) {
+                    self.chord_latched = false;
+                    return;
+                }
                 self.release_pattern(time, out, self.arp_enabled);
                 self.chord_len = 0;
                 self.chord_latched = false;
@@ -546,17 +608,41 @@ impl AudioEngine {
             EngineEvent::RollSet { ms_x10 } => {
                 self.roll_ms = (ms_x10 as f32 / 10.0).clamp(0.0, 150.0);
             }
+            EngineEvent::SetEnvelope {
+                delay,
+                attack,
+                hold,
+                decay,
+                sustain,
+                release,
+            } => {
+                self.env.set_params(crate::envelope::EnvelopeParams {
+                    delay,
+                    attack,
+                    hold,
+                    decay,
+                    sustain,
+                    release,
+                });
+            }
         }
     }
 
-    /// Advance arp / pending roll using the audio block length. Must run on the audio thread.
-    pub fn process_clock(&mut self, frames: u32, out: &mut Vec<GeneratedNote>) {
+    /// Advance envelope / arp / pending roll. Must run on the audio thread.
+    pub fn process_clock(&mut self, frames: u32, out: &mut Vec<GeneratedNote>) -> (f32, f32) {
+        let tick = self.env.advance(frames);
+        if let Some(t) = tick.note_on_at {
+            self.flush_delayed_chord(t, out);
+        }
+        if let Some(t) = tick.note_off_at {
+            self.finish_env_release(t, out);
+        }
         self.flush_roll(frames, out);
         if self.clock_synced {
-            return;
+            return (tick.start_gain, tick.end_gain);
         }
-        if !self.arp_enabled || self.strum_mode || self.chord_len == 0 {
-            return;
+        if !self.arp_enabled || self.strum_mode || self.chord_len == 0 || self.env_releasing {
+            return (tick.start_gain, tick.end_gain);
         }
         let rate = self.arp_rate_hz.max(0.25) as f64;
         let step_samples = self.sample_rate / rate;
@@ -565,6 +651,7 @@ impl AudioEngine {
             self.arp_phase -= step_samples;
             self.step_arp(0, out);
         }
+        (tick.start_gain, tick.end_gain)
     }
 
     fn step_arp(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
@@ -883,9 +970,83 @@ impl AudioEngine {
         }
     }
 
+    fn begin_env_release(&mut self, time: u32, out: &mut Vec<GeneratedNote>) -> bool {
+        if self.sustain || self.chord_gate || self.chromatic_held > 0 {
+            let _ = self.env.gate_off();
+            return false;
+        }
+        if self.env.gate_off().is_some() {
+            let _ = time;
+            let _ = out;
+            return false;
+        }
+        if self.env.is_releasing() {
+            self.env_releasing = true;
+            self.clear_roll();
+            return true;
+        }
+        false
+    }
+
+    fn flush_delayed_chord(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
+        let Some((notes, len)) = self.delayed_chord.take() else {
+            return;
+        };
+        if !self.chord_gate && !self.sustain {
+            return;
+        }
+        if self.strum_mode {
+            self.retarget_strum_voicing(notes, len, time, out);
+            return;
+        }
+        if self.arp_enabled {
+            self.chord = notes;
+            self.chord_len = len;
+            self.last_chord = notes;
+            self.last_chord_len = len;
+            self.arp_index = 0;
+            self.arp_dir = 1;
+            self.arp_phase = 0.0;
+            self.clock_pulses = 0;
+            return;
+        }
+        self.apply_block_chord(time, notes, len, out);
+    }
+
+    fn finish_env_release(&mut self, time: u32, out: &mut Vec<GeneratedNote>) {
+        self.env_releasing = false;
+        let keys: Vec<u8> = self.pending_off.drain_on().collect();
+        for key in keys {
+            if self.sounding.off(key) {
+                out.push(GeneratedNote {
+                    time,
+                    key,
+                    vel: 0,
+                    on: false,
+                });
+            }
+        }
+        if let Some(key) = self.arp_note.take() {
+            self.note_cut(time, key, out);
+        }
+        if self.block_chord_on {
+            self.release_block(time, out, true);
+        }
+        self.chord_len = 0;
+        self.chord_latched = false;
+    }
+
     fn set_sustain(&mut self, on: bool, time: u32, out: &mut Vec<GeneratedNote>) {
         self.sustain = on;
+        let off_now = self.env.set_hold(on);
         if on {
+            return;
+        }
+        if self.chord_gate || self.chromatic_held > 0 {
+            return;
+        }
+        if off_now.is_none() && self.env.is_releasing() {
+            self.env_releasing = true;
             return;
         }
         let keys: Vec<u8> = self.pending_off.drain_on().collect();
@@ -958,6 +1119,11 @@ impl AudioEngine {
         self.last_chord_len = 0;
         self.chord_latched = false;
         self.clear_roll();
+        self.env.reset();
+        self.chord_gate = false;
+        self.chromatic_held = 0;
+        self.delayed_chord = None;
+        self.env_releasing = false;
     }
 }
 
@@ -1050,6 +1216,7 @@ mod tests {
     #[test]
     fn arp_stops_when_chord_released() {
         let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(
@@ -1289,6 +1456,7 @@ mod tests {
     #[test]
     fn strum_off_keeps_notes_until_pad_up() {
         let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
@@ -1303,6 +1471,22 @@ mod tests {
         eng.handle(EngineEvent::ChordOff, 0, &mut out);
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         assert_eq!(offs, vec![60, 64, 67]);
+    }
+
+    fn instant_env(eng: &mut AudioEngine) {
+        let mut sink = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.0,
+                attack: 0.0,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.0,
+            },
+            0,
+            &mut sink,
+        );
     }
 
     fn triad() -> ([u8; MAX_CHORD_NOTES], u8) {
@@ -1325,6 +1509,7 @@ mod tests {
     #[test]
     fn sustain_holds_chord_until_pedal_up() {
         let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
@@ -1433,6 +1618,7 @@ mod tests {
     #[test]
     fn roll_release_cancels_unplayed_notes() {
         let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(EngineEvent::RollSet { ms_x10: 300 }, 0, &mut out);
@@ -1446,5 +1632,97 @@ mod tests {
         out.clear();
         eng.process_clock(2048, &mut out);
         assert!(out.iter().all(|n| !n.on));
+    }
+
+    #[test]
+    fn delay_defers_chord_on() {
+        let mut eng = AudioEngine::new(1_000.0);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.1,
+                attack: 0.0,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.0,
+            },
+            0,
+            &mut out,
+        );
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        assert!(out.iter().all(|n| !n.on));
+        out.clear();
+        eng.process_clock(50, &mut out);
+        assert!(out.iter().all(|n| !n.on));
+        out.clear();
+        eng.process_clock(50, &mut out);
+        let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
+        assert_eq!(ons, vec![60, 64, 67]);
+    }
+
+    #[test]
+    fn release_defers_chord_off() {
+        let mut eng = AudioEngine::new(1_000.0);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.0,
+                attack: 0.0,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 1.0,
+                release: 0.2,
+            },
+            0,
+            &mut out,
+        );
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.process_clock(100, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.process_clock(100, &mut out);
+        let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
+        assert_eq!(offs, vec![60, 64, 67]);
+    }
+
+    #[test]
+    fn sustain_hold_keeps_envelope_then_releases() {
+        let mut eng = AudioEngine::new(1_000.0);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::SetEnvelope {
+                delay: 0.0,
+                attack: 0.0,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 0.8,
+                release: 0.1,
+            },
+            0,
+            &mut out,
+        );
+        let (notes, len) = triad();
+        eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
+        eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
+        out.clear();
+        eng.handle(EngineEvent::ChordOff, 0, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.process_clock(50, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.handle(EngineEvent::Sustain { on: false }, 0, &mut out);
+        assert!(out.iter().all(|n| n.on));
+        out.clear();
+        eng.process_clock(100, &mut out);
+        let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
+        assert_eq!(offs, vec![60, 64, 67]);
     }
 }

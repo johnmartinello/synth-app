@@ -265,6 +265,14 @@ pub enum HostCommand {
     SetRoll {
         ms: f32,
     },
+    SetEnvelope {
+        delay: f32,
+        attack: f32,
+        hold: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+    },
     IncomingMidi(MidiBytes),
     Shutdown,
 }
@@ -299,6 +307,13 @@ struct StrumUi {
 #[derive(Clone, Serialize)]
 struct NotesUi {
     notes: Vec<u8>,
+}
+
+#[derive(Clone, Serialize)]
+struct EnvUi {
+    stage: u8,
+    progress: f32,
+    level: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -379,6 +394,17 @@ fn emit_notes_ui(app: &AppHandle, last: &mut [u64; 2]) {
     *last = mask;
     let notes = crate::audio::sounding_keys_from_mask(mask);
     let _ = app.emit("notes-ui", NotesUi { notes });
+}
+
+fn emit_env_ui(app: &AppHandle, last: &mut u32) {
+    let (stage, progress, level) = crate::audio::env_playhead();
+    let q = ((progress.clamp(0.0, 1.0) * 80.0).round() as u32).min(80);
+    let packed = (u32::from(stage) << 16) | (q << 8) | ((level.clamp(0.0, 1.0) * 255.0) as u32);
+    if packed == *last {
+        return;
+    }
+    *last = packed;
+    let _ = app.emit("env-ui", EnvUi { stage, progress, level });
 }
 
 fn emit_pads_ui(app: Option<&AppHandle>, held: &[u8]) {
@@ -687,6 +713,7 @@ fn run_with_plugin(
     let (midi_bytes_tx, midi_bytes_rx) = unbounded::<MidiBytes>();
     let mut midi_clock = MidiClock::new();
     let mut last_notes = [0u64; 2];
+    let mut last_env = u32::MAX;
 
     loop {
         while let Ok(bytes) = midi_bytes_rx.try_recv() {
@@ -817,6 +844,7 @@ fn run_with_plugin(
         }
 
         emit_notes_ui(&app, &mut last_notes);
+        emit_env_ui(&app, &mut last_env);
     }
 
     if let Some(g) = gui.as_mut() {
@@ -1130,6 +1158,26 @@ fn handle_command(
             push_roll(prod, settings);
             copy_controls(status, settings, midi_clock.live);
             emit_status(app, status);
+        }
+        HostCommand::SetEnvelope {
+            delay,
+            attack,
+            hold,
+            decay,
+            sustain,
+            release,
+        } => {
+            push_engine(
+                prod,
+                EngineEvent::SetEnvelope {
+                    delay,
+                    attack,
+                    hold,
+                    decay,
+                    sustain,
+                    release,
+                },
+            );
         }
         HostCommand::SetStrumMode { enabled } => {
             settings.strum_mode = enabled;

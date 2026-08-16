@@ -30,6 +30,21 @@ fn filter_norm() -> f32 {
     f32::from_bits(FILTER_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
 }
 
+fn apply_env_gain(frames: &mut [f32], channels: usize, start: f32, end: f32) {
+    let step = channels.max(1);
+    let n = frames.len() / step;
+    if n == 0 {
+        return;
+    }
+    let den = n as f32;
+    for (i, frame) in frames.chunks_exact_mut(step).enumerate() {
+        let g = start + (end - start) * (i as f32 / den);
+        for s in frame.iter_mut() {
+            *s *= g;
+        }
+    }
+}
+
 /// Two cascaded one-pole low-passes on the host output (12 dB/oct).
 struct Lowpass {
     sample_rate: f32,
@@ -200,7 +215,8 @@ impl StreamAudioProcessor {
         while let Ok(ev) = self.engine_consumer.pop() {
             self.engine.handle(ev, 0, &mut self.generated);
         }
-        self.engine
+        let (env_start, env_end) = self
+            .engine
             .process_clock(sample_count as u32, &mut self.generated);
 
         self.events.clear();
@@ -231,23 +247,44 @@ impl StreamAudioProcessor {
             Ok(_) => {
                 self.lowpass.set_norm(filter_norm());
                 let lp = &mut self.lowpass;
-                self.buffers
-                    .write_to_cpal_buffer(data, |buf, ch| lp.process_interleaved(buf, ch));
+                self.buffers.write_to_cpal_buffer(data, |buf, ch| {
+                    lp.process_interleaved(buf, ch);
+                    apply_env_gain(buf, ch, env_start, env_end);
+                });
             }
             Err(e) => log::error!("Plugin process error: {e}"),
         }
         self.steady_counter += sample_count as u64;
         publish_sounding(&self.engine);
+        publish_env(&self.engine);
     }
 }
 
 static SOUNDING_LO: AtomicU64 = AtomicU64::new(0);
 static SOUNDING_HI: AtomicU64 = AtomicU64::new(0);
+static ENV_STAGE: AtomicU32 = AtomicU32::new(0);
+static ENV_PROGRESS: AtomicU32 = AtomicU32::new(0);
+static ENV_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 fn publish_sounding(engine: &AudioEngine) {
     let [lo, hi] = engine.sounding_mask();
     SOUNDING_LO.store(lo, Ordering::Relaxed);
     SOUNDING_HI.store(hi, Ordering::Relaxed);
+}
+
+fn publish_env(engine: &AudioEngine) {
+    let (stage, progress, level) = engine.env_playhead();
+    ENV_STAGE.store(stage as u32, Ordering::Relaxed);
+    ENV_PROGRESS.store(progress.to_bits(), Ordering::Relaxed);
+    ENV_LEVEL.store(level.to_bits(), Ordering::Relaxed);
+}
+
+pub fn env_playhead() -> (u8, f32, f32) {
+    (
+        ENV_STAGE.load(Ordering::Relaxed) as u8,
+        f32::from_bits(ENV_PROGRESS.load(Ordering::Relaxed)).clamp(0.0, 1.0),
+        f32::from_bits(ENV_LEVEL.load(Ordering::Relaxed)).clamp(0.0, 1.0),
+    )
 }
 
 pub fn sounding_mask() -> [u64; 2] {
