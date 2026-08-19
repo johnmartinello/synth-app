@@ -230,7 +230,15 @@ export default function Home() {
   const metroBpmGesture = useRef(false);
   const metroVolGesture = useRef(false);
 
+  const piano = chordType === "1";
+
   const previewNotes = useMemo(() => {
+    if (piano) {
+      const delta = (octave - 4) * 12;
+      return (engineNotes ?? []).map((n) =>
+        Math.max(0, Math.min(127, n - delta)),
+      );
+    }
     if (held.size > 0) {
       const all = [...held].flatMap((degree) =>
         chordMidi(root, scale, chordType, inversion, secondary, octave, degree),
@@ -240,6 +248,7 @@ export default function Home() {
     if (engineNotes != null && engineNotes.length > 0) return engineNotes;
     return [];
   }, [
+    piano,
     engineNotes,
     held,
     root,
@@ -609,6 +618,7 @@ export default function Home() {
               label="Key"
               value={String(root)}
               options={ROOTS.map((n, i) => [String(i), n] as const)}
+              disabledIds={piano ? ROOTS.map((_, i) => String(i)) : []}
               onChange={(v) => setRoot(Number(v))}
             />
             <HwToggleGroup
@@ -618,6 +628,7 @@ export default function Home() {
                 ["major", "Maj"],
                 ["minor", "Min"],
               ]}
+              disabledIds={piano ? ["major", "minor"] : []}
               onChange={(v) => setScale(v as "major" | "minor")}
             />
           </div>
@@ -647,7 +658,13 @@ export default function Home() {
               onChange={(v) => {
                 const next = v as ChordType;
                 setChordType(next);
-                setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
+                if (next === "1") {
+                  setInversion(0);
+                  setSecondary("none");
+                  setStrumMode(false);
+                } else {
+                  setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
+                }
               }}
             />
             <HwToggleGroup
@@ -655,7 +672,11 @@ export default function Home() {
               value={String(inversion)}
               options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
               disabledIds={
-                chordType === "1" ? ["1", "2", "3"] : chordType === "tri" ? ["3"] : []
+                piano
+                  ? INVERSIONS.map(([id]) => String(id))
+                  : chordType === "tri"
+                    ? ["3"]
+                    : []
               }
               onChange={(v) => setInversion(Number(v))}
             />
@@ -663,6 +684,7 @@ export default function Home() {
               label="Sec"
               value={secondary}
               options={SECONDARIES}
+              disabledIds={piano ? SECONDARIES.map(([id]) => id) : []}
               onChange={(v) => setSecondary(v as Secondary)}
             />
           </div>
@@ -766,12 +788,16 @@ export default function Home() {
         <Silk className="max-lg:order-1">Keyboard</Silk>
         <div className="flex items-center justify-between gap-2 max-lg:order-3">
           <Silk>Strum</Silk>
-          <HwToggle on={strumMode} onClick={() => setStrumMode((v) => !v)}>
+          <HwToggle
+            on={strumMode}
+            disabled={piano}
+            onClick={() => setStrumMode((v) => !v)}
+          >
             On
           </HwToggle>
         </div>
         <div className="max-lg:order-2">
-          <PianoPreview notes={previewNotes} octave={octave} />
+          <PianoPreview notes={previewNotes} octave={octave} playable={piano} />
         </div>
         <div className="max-lg:order-4">
           <StrumPlate
@@ -874,6 +900,7 @@ export default function Home() {
             max={500}
             step={1}
             disabled={
+              piano ||
               (held.size === 0 ? TONE_COUNT[chordType] : heldNotes.length) <= 1
             }
             onChange={(v) => {
@@ -1461,16 +1488,19 @@ function ConfigModal({
             <HwButton onClick={onRefreshPorts}>Refresh</HwButton>
           </div>
           <p className="mt-2 text-[11px] leading-4 text-[var(--muted)]">
-            The first hardware input is opened on launch. White keys in any
-            octave = chords 1–7; Oct− / Oct+ on a controller shifts the chord
-            octave. Other notes are chromatic. The Env sustain knob is the
-            hold level; Space and the sustain pedal (CC64) keep the gate
-            open. In strum mode, the mod touchbar (CC1) sweeps the
-            strings. Arp button (CC102) toggles arp. Rate follows MIDI clock
-            when present. Click MIDI next to a knob, then move a controller
-            knob to assign it (right-click to clear). Filter is a 12 dB/oct
-            SVF on the output (LP / HP / BP / notch); Res emphasizes the
-            cutoff. Roll staggers block chords.
+            The first hardware input is opened on launch. With Type tri / 7 /
+            9 / 11 / 13, white keys in any octave = chords 1–7; Oct− / Oct+
+            on a controller shifts the chord octave; other notes are
+            chromatic. Type 1 is piano: every key plays as written, Oct
+            transposes, and arp walks the held notes. Key / Scale / Inv /
+            Sec are off. The Env
+            sustain knob is the hold level; Space and the sustain pedal
+            (CC64) keep the gate open. In strum mode, the mod touchbar
+            (CC1) sweeps the strings. Arp button (CC102) toggles arp. Rate
+            follows MIDI clock when present. Click MIDI next to a knob,
+            then move a controller knob to assign it (right-click to clear).
+            Filter is a 12 dB/oct SVF on the output (LP / HP / BP / notch);
+            Res emphasizes the cutoff. Roll staggers block chords.
           </p>
         </div>
         <div>
@@ -1524,9 +1554,55 @@ function pianoRange(notes: number[], _octave: number) {
   return { start, end };
 }
 
-function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
-  const pressed = useMemo(() => new Set(notes), [notes]);
+function PianoPreview({
+  notes,
+  octave,
+  playable = false,
+}: {
+  notes: number[];
+  octave: number;
+  playable?: boolean;
+}) {
+  const [local, setLocal] = useState<number[]>([]);
+  const pointers = useRef(new Map<number, number>());
+  const pressed = useMemo(() => new Set([...notes, ...local]), [notes, local]);
   const { start, end } = useMemo(() => pianoRange(notes, octave), [notes, octave]);
+
+  useEffect(() => {
+    if (playable) return;
+    const held = [...pointers.current.values()];
+    pointers.current.clear();
+    setLocal([]);
+    for (const key of held) {
+      invoke("note_off", { key }).catch(() => undefined);
+    }
+  }, [playable]);
+
+  useEffect(() => {
+    return () => {
+      for (const key of pointers.current.values()) {
+        invoke("note_off", { key }).catch(() => undefined);
+      }
+      pointers.current.clear();
+    };
+  }, []);
+
+  const pressKey = (midi: number, pointerId: number, target: HTMLElement) => {
+    if (!playable) return;
+    if ([...pointers.current.values()].includes(midi)) return;
+    pointers.current.set(pointerId, midi);
+    setLocal((prev) => (prev.includes(midi) ? prev : [...prev, midi]));
+    target.setPointerCapture?.(pointerId);
+    invoke("note_on", { key: midi, vel: 100 }).catch(() => undefined);
+  };
+  const releasePointer = (pointerId: number) => {
+    const midi = pointers.current.get(pointerId);
+    if (midi == null) return;
+    pointers.current.delete(pointerId);
+    setLocal((prev) => prev.filter((n) => n !== midi));
+    invoke("note_off", { key: midi }).catch(() => undefined);
+  };
+
   const whites: number[] = [];
   const blacks: { midi: number; after: number }[] = [];
   for (let m = start; m < end; m += 1) {
@@ -1537,6 +1613,7 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
     }
   }
   const n = Math.max(1, whites.length);
+  const keyClass = playable ? "cursor-pointer touch-none" : "";
   return (
     <div className="relative h-40 select-none">
       <div className="flex h-full overflow-hidden rounded-[var(--r)] border border-[var(--line)] bg-[#101010]">
@@ -1545,13 +1622,19 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
           return (
             <div
               key={m}
-              className={`relative min-w-0 flex-1 border-r border-black/20 last:border-r-0 ${
+              className={`relative min-w-0 flex-1 border-r border-black/20 last:border-r-0 ${keyClass} ${
                 on ? "bg-[var(--ivory-press)]" : "bg-[var(--ivory)]"
               }`}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                pressKey(m, e.pointerId, e.currentTarget);
+              }}
+              onPointerUp={(e) => releasePointer(e.pointerId)}
+              onPointerCancel={(e) => releasePointer(e.pointerId)}
             >
               {m % 12 === 0 && (
                 <span
-                  className={`absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-medium ${
+                  className={`pointer-events-none absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-medium ${
                     on ? "text-[#1a1208]/80" : "text-[#24180a]/45"
                   }`}
                 >
@@ -1559,7 +1642,7 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
                 </span>
               )}
               {on && m % 12 !== 0 && (
-                <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-[#1a1208]/80">
+                <span className="pointer-events-none absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-[#1a1208]/80">
                   {NOTE_NAMES[m % 12]}
                 </span>
               )}
@@ -1573,7 +1656,7 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
         return (
           <div
             key={midi}
-            className={`absolute top-0 z-10 rounded-b-[2px] border border-black/50 ${
+            className={`absolute top-0 z-10 rounded-b-[2px] border border-black/50 ${keyClass} ${
               on ? "bg-[var(--ivory-press)]" : "bg-[#161616]"
             }`}
             style={{
@@ -1582,6 +1665,13 @@ function PianoPreview({ notes, octave }: { notes: number[]; octave: number }) {
               height: "62%",
               transform: "translateX(-50%)",
             }}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              pressKey(midi, e.pointerId, e.currentTarget);
+            }}
+            onPointerUp={(e) => releasePointer(e.pointerId)}
+            onPointerCancel={(e) => releasePointer(e.pointerId)}
           />
         );
       })}

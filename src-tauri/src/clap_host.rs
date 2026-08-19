@@ -8,8 +8,8 @@ use crate::audio::activate_to_stream;
 pub use crate::audio::FilterMode;
 use crate::discovery::{self, DiscoveryReport};
 use crate::engine::{
-    midi_octave, midi_to_degree, sanitize_roll_ms, ArpMode, ChordType, EngineEvent, EngineSettings,
-    ScaleKind, Secondary, MAX_CHORD_NOTES,
+    midi_octave, midi_to_degree, piano_identity, piano_transposed, sanitize_roll_ms, ArpMode, ChordType,
+    EngineEvent, EngineSettings, ScaleKind, Secondary, MAX_CHORD_NOTES,
 };
 use crate::envelope::EnvelopeParams;
 use crate::looper::{LooperEvent, LooperStatus};
@@ -882,6 +882,153 @@ fn copy_controls(status: &mut HostStatus, settings: &EngineSettings, midi_clock:
     status.roll_ms = settings.roll_ms;
 }
 
+fn piano_note_on(prod: &mut Producer<EngineEvent>, key: u8, vel: u8) {
+    push_engine(prod, EngineEvent::ChromaticOn { key, vel: vel.max(1) });
+}
+
+fn piano_note_off(prod: &mut Producer<EngineEvent>, key: u8) {
+    push_engine(prod, EngineEvent::ChromaticOff { key });
+}
+
+fn send_note_set(prod: &mut Producer<EngineEvent>, packed: Vec<u8>) {
+    if packed.is_empty() {
+        push_engine(prod, EngineEvent::ChordOff);
+        return;
+    }
+    let packed: Vec<u8> = {
+        let mut notes = packed;
+        notes.sort_unstable();
+        notes.dedup();
+        notes.truncate(MAX_CHORD_NOTES);
+        notes
+    };
+    let mut notes = [0u8; MAX_CHORD_NOTES];
+    for (i, n) in packed.iter().enumerate() {
+        notes[i] = *n;
+    }
+    push_engine(
+        prod,
+        EngineEvent::ChordOn {
+            notes,
+            len: packed.len() as u8,
+        },
+    );
+}
+
+fn send_piano_voicing(
+    prod: &mut Producer<EngineEvent>,
+    settings: &EngineSettings,
+    piano_keys: &[u8],
+    held_pads: &[u8],
+) {
+    let mut packed = Vec::new();
+    for &key in piano_keys {
+        packed.push(piano_transposed(key, settings.octave));
+    }
+    for &degree in held_pads {
+        packed.extend(crate::engine::chord_notes_vec(settings, degree));
+    }
+    send_note_set(prod, packed);
+}
+
+fn follow_midi_octave(
+    settings: &mut EngineSettings,
+    key: u8,
+    status: &mut HostStatus,
+    midi_clock: bool,
+    app: Option<&AppHandle>,
+) -> bool {
+    let oct = midi_octave(key).clamp(1, 7);
+    if oct == settings.octave {
+        return false;
+    }
+    settings.octave = oct;
+    copy_controls(status, settings, midi_clock);
+    if let Some(app) = app {
+        emit_status(app, status);
+    }
+    true
+}
+
+fn piano_midi_press(
+    piano_keys: &mut Vec<u8>,
+    held_pads: &[u8],
+    settings: &mut EngineSettings,
+    prod: &mut Producer<EngineEvent>,
+    status: &mut HostStatus,
+    midi_clock: bool,
+    app: Option<&AppHandle>,
+    key: u8,
+) {
+    follow_midi_octave(settings, key, status, midi_clock, app);
+    let id = piano_identity(key, settings.octave);
+    if !piano_keys.contains(&id) {
+        piano_keys.push(id);
+    }
+    send_piano_voicing(prod, settings, piano_keys, held_pads);
+}
+
+fn piano_midi_release(
+    piano_keys: &mut Vec<u8>,
+    held_pads: &[u8],
+    settings: &EngineSettings,
+    prod: &mut Producer<EngineEvent>,
+    key: u8,
+) {
+    let id = piano_identity(key, settings.octave);
+    piano_keys.retain(|&k| k != id);
+    if settings.arp_enabled && settings.arp_latch {
+        return;
+    }
+    send_piano_voicing(prod, settings, piano_keys, held_pads);
+}
+
+fn send_current_voicing(
+    prod: &mut Producer<EngineEvent>,
+    settings: &EngineSettings,
+    piano_keys: &[u8],
+    held_pads: &[u8],
+) {
+    if settings.chord_type.is_piano() {
+        send_piano_voicing(prod, settings, piano_keys, held_pads);
+    } else {
+        send_held_chords(prod, settings, held_pads);
+    }
+}
+
+fn drop_held_input(
+    prod: &mut Producer<EngineEvent>,
+    midi_pads: &mut MidiPadState,
+    held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
+    app: Option<&AppHandle>,
+) {
+    held_pads.clear();
+    piano_keys.clear();
+    midi_pads.clear();
+    push_engine(prod, EngineEvent::Panic);
+    emit_pads_ui(app, held_pads);
+}
+
+fn silence_chord_play(
+    settings: &mut EngineSettings,
+    prod: &mut Producer<EngineEvent>,
+    status: &mut HostStatus,
+    midi_clock: bool,
+    midi_pads: &mut MidiPadState,
+    held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
+    app: &AppHandle,
+) {
+    settings.inversion = 0;
+    settings.secondary = Secondary::None;
+    settings.strum_mode = false;
+    drop_held_input(prod, midi_pads, held_pads, piano_keys, Some(app));
+    push_engine(prod, EngineEvent::SetStrumMode { enabled: false });
+    copy_controls(status, settings, midi_clock);
+    emit_status(app, status);
+}
+
 fn copy_learn(status: &mut HostStatus, learn: &MidiLearnState) {
     status.midi_learn = learn.armed.map(LearnableParam::as_id).map(str::to_string);
     status.midi_maps = learn.map.to_status_maps();
@@ -1008,28 +1155,11 @@ fn sync_sustain(
 }
 
 fn send_held_chords(prod: &mut Producer<EngineEvent>, settings: &EngineSettings, held: &[u8]) {
-    if held.is_empty() {
-        push_engine(prod, EngineEvent::ChordOff);
-        return;
-    }
     let mut packed = Vec::new();
     for degree in held {
         packed.extend(crate::engine::chord_notes_vec(settings, *degree));
     }
-    packed.sort_unstable();
-    packed.dedup();
-    packed.truncate(MAX_CHORD_NOTES);
-    let mut notes = [0u8; MAX_CHORD_NOTES];
-    for (i, n) in packed.iter().enumerate() {
-        notes[i] = *n;
-    }
-    push_engine(
-        prod,
-        EngineEvent::ChordOn {
-            notes,
-            len: packed.len() as u8,
-        },
-    );
+    send_note_set(prod, packed);
 }
 
 pub fn run_host_thread(app: AppHandle, cmd_rx: Receiver<HostCommand>) {
@@ -1140,6 +1270,7 @@ fn run_with_plugin(
     let mut midi_conn: Option<MidiInputConnection<u8>> = None;
     let mut midi_pads = MidiPadState::new();
     let mut held_pads: Vec<u8> = Vec::new();
+    let mut piano_keys: Vec<u8> = Vec::new();
     let (midi_bytes_tx, midi_bytes_rx) = unbounded::<MidiBytes>();
     let mut midi_clock = MidiClock::new();
     let mut learn = MidiLearnState::new(
@@ -1169,6 +1300,7 @@ fn run_with_plugin(
                 &mut engine_prod,
                 &mut midi_pads,
                 &mut held_pads,
+                &mut piano_keys,
                 &mut midi_clock,
                 &mut looper,
                 &mut metro,
@@ -1225,6 +1357,7 @@ fn run_with_plugin(
                 &midi_bytes_tx,
                 &mut midi_pads,
                 &mut held_pads,
+                &mut piano_keys,
                 &mut midi_clock,
                 &mut looper,
                 &mut metro,
@@ -1251,6 +1384,7 @@ fn run_with_plugin(
                 &midi_bytes_tx,
                 &mut midi_pads,
                 &mut held_pads,
+                &mut piano_keys,
                 &mut midi_clock,
                 &mut looper,
                 &mut metro,
@@ -1315,6 +1449,7 @@ fn run_with_plugin(
                 &mut learn,
                 &mut midi_pads,
                 &mut held_pads,
+                &mut piano_keys,
                 status,
                 &app,
             );
@@ -1343,6 +1478,7 @@ fn handle_incoming_midi(
     prod: &mut Producer<EngineEvent>,
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     looper: &mut LooperSettings,
     metro: &mut MetronomeSettings,
@@ -1411,7 +1547,7 @@ fn handle_incoming_midi(
                 if learn.map.param_for(MidiSource::note(key)).is_some() {
                     return;
                 }
-                handle_midi_note_off(key, settings, prod, midi_pads, held_pads, app);
+                handle_midi_note_off(key, settings, prod, midi_pads, held_pads, piano_keys, app);
                 return;
             }
             if handle_learned_source(
@@ -1429,14 +1565,25 @@ fn handle_incoming_midi(
                 return;
             }
             stop_test_c(prod, status);
-            if let Some(degree) = midi_to_degree(key) {
+            if settings.chord_type.is_piano() {
+                piano_midi_press(
+                    piano_keys,
+                    held_pads,
+                    settings,
+                    prod,
+                    status,
+                    midi_clock.live,
+                    app,
+                    key,
+                );
+            } else if let Some(degree) = midi_to_degree(key) {
                 let oct = midi_octave(key).clamp(1, 7);
                 let oct_changed = oct != settings.octave;
                 settings.octave = oct;
                 if let Some(degree) = midi_pads.note_on(key, degree) {
                     let same_chord = held_pads.last() == Some(&degree);
                     if !(same_chord && settings.arp_enabled && !oct_changed) {
-                        press_degree(held_pads, degree, settings, prod);
+                        press_degree(held_pads, degree, settings, piano_keys, prod);
                     }
                 }
                 emit_pads_ui(app, held_pads);
@@ -1447,7 +1594,7 @@ fn handle_incoming_midi(
                     }
                 }
             } else {
-                push_engine(prod, EngineEvent::ChromaticOn { key, vel });
+                piano_note_on(prod, key, vel);
             }
         }
         MidiMessage::NoteOff(_ch, note, _vel) => {
@@ -1455,7 +1602,7 @@ fn handle_incoming_midi(
             if learn.map.param_for(MidiSource::note(key)).is_some() {
                 return;
             }
-            handle_midi_note_off(key, settings, prod, midi_pads, held_pads, app);
+            handle_midi_note_off(key, settings, prod, midi_pads, held_pads, piano_keys, app);
         }
         MidiMessage::ChannelPressure(_ch, pressure) => {
             handle_mod_touchbar(u8::from(pressure), settings, prod, app);
@@ -1489,7 +1636,10 @@ fn handle_incoming_midi(
                     }
                     settings.arp_enabled = !settings.arp_enabled;
                     push_arp(prod, settings);
-                    if !settings.arp_enabled && held_pads.is_empty() {
+                    if !settings.arp_enabled
+                        && held_pads.is_empty()
+                        && piano_keys.is_empty()
+                    {
                         push_engine(prod, EngineEvent::ChordOff);
                     }
                     copy_controls(status, settings, midi_clock.live);
@@ -1499,12 +1649,14 @@ fn handle_incoming_midi(
                 }
                 123 => {
                     held_pads.clear();
+                    piano_keys.clear();
                     midi_pads.clear();
                     push_engine(prod, EngineEvent::Panic);
                     emit_pads_ui(app, held_pads);
                 }
                 120 if val > 0 => {
                     held_pads.clear();
+                    piano_keys.clear();
                     midi_pads.clear();
                     push_engine(prod, EngineEvent::Panic);
                     emit_pads_ui(app, held_pads);
@@ -1717,17 +1869,22 @@ fn handle_midi_note_off(
     prod: &mut Producer<EngineEvent>,
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
     app: Option<&AppHandle>,
 ) {
+    if settings.chord_type.is_piano() {
+        piano_midi_release(piano_keys, held_pads, settings, prod, key);
+        return;
+    }
     if let Some(degree) = midi_pads.note_off(key) {
         if settings.arp_enabled && settings.arp_latch {
             held_pads.retain(|d| *d != degree);
         } else {
-            release_degree(held_pads, degree, settings, prod);
+            release_degree(held_pads, degree, settings, piano_keys, prod);
         }
         emit_pads_ui(app, held_pads);
     } else if midi_to_degree(key).is_none() {
-        push_engine(prod, EngineEvent::ChromaticOff { key });
+        piano_note_off(prod, key);
     }
 }
 
@@ -1758,6 +1915,7 @@ fn set_midi_sink(
     learn: &mut MidiLearnState,
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
     status: &mut HostStatus,
     app: &AppHandle,
 ) {
@@ -1765,6 +1923,7 @@ fn set_midi_sink(
     status.midi_sink = if to_surge { "surge" } else { "app" }.into();
     learn.cancel();
     held_pads.clear();
+    piano_keys.clear();
     midi_pads.clear();
     push_engine(prod, EngineEvent::Panic);
     status.test_c_playing = false;
@@ -1791,30 +1950,33 @@ fn press_degree(
     held_pads: &mut Vec<u8>,
     degree: u8,
     settings: &EngineSettings,
+    piano_keys: &[u8],
     prod: &mut Producer<EngineEvent>,
 ) {
     if !held_pads.contains(&degree) {
         held_pads.push(degree);
     }
-    send_held_chords(prod, settings, held_pads);
+    send_current_voicing(prod, settings, piano_keys, held_pads);
 }
 
 fn refresh_held_chord(
     held_pads: &[u8],
+    piano_keys: &[u8],
     settings: &EngineSettings,
     prod: &mut Producer<EngineEvent>,
 ) {
-    send_held_chords(prod, settings, held_pads);
+    send_current_voicing(prod, settings, piano_keys, held_pads);
 }
 
 fn release_degree(
     held_pads: &mut Vec<u8>,
     degree: u8,
     settings: &EngineSettings,
+    piano_keys: &[u8],
     prod: &mut Producer<EngineEvent>,
 ) {
     held_pads.retain(|d| *d != degree);
-    send_held_chords(prod, settings, held_pads);
+    send_current_voicing(prod, settings, piano_keys, held_pads);
 }
 
 fn stop_test_c(prod: &mut Producer<EngineEvent>, status: &mut HostStatus) {
@@ -1841,6 +2003,7 @@ fn handle_command(
     midi_bytes_tx: &Sender<MidiBytes>,
     midi_pads: &mut MidiPadState,
     held_pads: &mut Vec<u8>,
+    piano_keys: &mut Vec<u8>,
     midi_clock: &mut MidiClock,
     looper: &mut LooperSettings,
     metro: &mut MetronomeSettings,
@@ -1857,6 +2020,7 @@ fn handle_command(
                 prod,
                 midi_pads,
                 held_pads,
+                piano_keys,
                 midi_clock,
                 looper,
                 metro,
@@ -1868,14 +2032,29 @@ fn handle_command(
         }
         HostCommand::NoteOn { key, vel } => {
             stop_test_c(prod, status);
-            push_engine(prod, EngineEvent::ChromaticOn { key, vel });
+            if settings.chord_type.is_piano() {
+                if !piano_keys.contains(&key) {
+                    piano_keys.push(key);
+                }
+                send_piano_voicing(prod, settings, piano_keys, held_pads);
+            } else {
+                piano_note_on(prod, key, vel);
+            }
             emit_status(app, status);
         }
         HostCommand::NoteOff { key } => {
-            push_engine(prod, EngineEvent::ChromaticOff { key });
+            if settings.chord_type.is_piano() {
+                piano_keys.retain(|&k| k != key);
+                if !(settings.arp_enabled && settings.arp_latch) {
+                    send_piano_voicing(prod, settings, piano_keys, held_pads);
+                }
+            } else {
+                piano_note_off(prod, key);
+            }
         }
         HostCommand::Panic => {
             held_pads.clear();
+            piano_keys.clear();
             midi_pads.clear();
             push_engine(prod, EngineEvent::Panic);
             status.test_c_playing = false;
@@ -1885,30 +2064,44 @@ fn handle_command(
         }
         HostCommand::PadDown { degree } => {
             stop_test_c(prod, status);
-            press_degree(held_pads, degree, settings, prod);
+            press_degree(held_pads, degree, settings, piano_keys, prod);
             emit_pads_ui(Some(app), held_pads);
             emit_status(app, status);
         }
         HostCommand::PadUp { degree } => {
-            release_degree(held_pads, degree, settings, prod);
+            release_degree(held_pads, degree, settings, piano_keys, prod);
             emit_pads_ui(Some(app), held_pads);
         }
         HostCommand::SetKey { root, scale } => {
+            if settings.chord_type.is_piano() {
+                return;
+            }
             let root = root % 12;
             if settings.root == root && settings.scale == scale {
                 return;
             }
             settings.root = root;
             settings.scale = scale;
-            refresh_held_chord(held_pads, settings, prod);
+            refresh_held_chord(held_pads, piano_keys, settings, prod);
         }
         HostCommand::SetChordShape {
             chord_type,
             inversion,
             secondary,
         } => {
+            let entering_piano = chord_type.is_piano() && !settings.chord_type.is_piano();
+            let leaving_piano = settings.chord_type.is_piano() && !chord_type.is_piano();
             let max_inv = chord_type.tone_count().saturating_sub(1) as u8;
-            let inversion = inversion.min(max_inv);
+            let inversion = if chord_type.is_piano() {
+                0
+            } else {
+                inversion.min(max_inv)
+            };
+            let secondary = if chord_type.is_piano() {
+                Secondary::None
+            } else {
+                secondary
+            };
             if settings.chord_type == chord_type
                 && settings.inversion == inversion
                 && settings.secondary == secondary
@@ -1918,7 +2111,23 @@ fn handle_command(
             settings.chord_type = chord_type;
             settings.inversion = inversion;
             settings.secondary = secondary;
-            refresh_held_chord(held_pads, settings, prod);
+            if entering_piano {
+                silence_chord_play(
+                    settings,
+                    prod,
+                    status,
+                    midi_clock.live,
+                    midi_pads,
+                    held_pads,
+                    piano_keys,
+                    app,
+                );
+            } else if leaving_piano {
+                drop_held_input(prod, midi_pads, held_pads, piano_keys, Some(app));
+                refresh_held_chord(held_pads, piano_keys, settings, prod);
+            } else {
+                refresh_held_chord(held_pads, piano_keys, settings, prod);
+            }
         }
         HostCommand::SetOctave { octave } => {
             let octave = octave.clamp(1, 7);
@@ -1927,7 +2136,7 @@ fn handle_command(
             }
             settings.octave = octave;
             copy_controls(status, settings, midi_clock.live);
-            refresh_held_chord(held_pads, settings, prod);
+            refresh_held_chord(held_pads, piano_keys, settings, prod);
             emit_status(app, status);
         }
         HostCommand::SetArp {
@@ -2004,6 +2213,7 @@ fn handle_command(
             emit_status(app, status);
         }
         HostCommand::SetStrumMode { enabled } => {
+            let enabled = enabled && !settings.chord_type.is_piano();
             settings.strum_mode = enabled;
             push_engine(prod, EngineEvent::SetStrumMode { enabled });
             if !enabled {
@@ -2057,6 +2267,7 @@ fn handle_command(
             if mute {
                 learn.cancel();
                 held_pads.clear();
+                piano_keys.clear();
                 midi_pads.clear();
                 push_engine(prod, EngineEvent::Panic);
                 status.test_c_playing = false;

@@ -44,6 +44,11 @@ impl ChordType {
             ChordType::Thirteenth => 7,
         }
     }
+
+    /// Type `1` is piano: MIDI (and the on-screen keys) play as written.
+    pub fn is_piano(self) -> bool {
+        matches!(self, ChordType::Single)
+    }
 }
 
 /// Applied-chord function relative to the held degree.
@@ -186,6 +191,8 @@ impl Default for EngineSettings {
 /// MIDI white keys in any octave map to degrees 1–7 (C=I … B=vii).
 /// Oct− / Oct+ on a controller only transpose the notes it sends, so this
 /// keeps degree pads working after an octave shift.
+/// Not used while `ChordType::is_piano()` — those notes stay written MIDI,
+/// then shift by `piano_transposed` from Oct 4.
 pub fn midi_to_degree(note: u8) -> Option<u8> {
     match note % 12 {
         0 => Some(1),
@@ -197,6 +204,18 @@ pub fn midi_to_degree(note: u8) -> Option<u8> {
         11 => Some(7),
         _ => None,
     }
+}
+
+/// Shift a written MIDI note so Oct 4 is identity (C4 stays 60).
+pub fn piano_transposed(key: u8, octave: i8) -> u8 {
+    let delta = (octave.clamp(1, 7) as i16 - 4) * 12;
+    (i16::from(key) + delta).clamp(0, 127) as u8
+}
+
+/// Inverse of [`piano_transposed`]: concert MIDI → Oct-4 identity.
+pub fn piano_identity(key: u8, octave: i8) -> u8 {
+    let delta = (octave.clamp(1, 7) as i16 - 4) * 12;
+    (i16::from(key) - delta).clamp(0, 127) as u8
 }
 
 /// Scientific pitch octave for a MIDI note (C4 = 60 → 4).
@@ -444,12 +463,10 @@ impl AudioEngine {
     pub fn handle(&mut self, ev: EngineEvent, time: u32, out: &mut Vec<GeneratedNote>) {
         match ev {
             EngineEvent::ChromaticOn { key, vel } => {
-                if !self.strum_mode {
-                    self.chromatic_held = self.chromatic_held.saturating_add(1);
-                    let _ = self.env.gate_on();
-                    self.env_releasing = false;
-                    self.note_on(time, key, vel, out);
-                }
+                self.chromatic_held = self.chromatic_held.saturating_add(1);
+                let _ = self.env.gate_on();
+                self.env_releasing = false;
+                self.note_on(time, key, vel, out);
             }
             EngineEvent::ChromaticOff { key } => {
                 self.chromatic_held = self.chromatic_held.saturating_sub(1);
@@ -1255,6 +1272,59 @@ mod tests {
         assert_eq!(midi_to_degree(71), Some(7));
         assert_eq!(midi_octave(48), 3);
         assert_eq!(midi_octave(60), 4);
+    }
+
+    #[test]
+    fn piano_transpose_is_identity_at_octave_4() {
+        assert_eq!(piano_transposed(57, 4), 57);
+        assert_eq!(piano_transposed(60, 4), 60);
+        assert_eq!(piano_transposed(60, 5), 72);
+        assert_eq!(piano_transposed(60, 3), 48);
+        assert_eq!(piano_transposed(127, 7), 127);
+        assert_eq!(piano_transposed(0, 1), 0);
+        assert_eq!(piano_identity(72, 5), 60);
+        assert_eq!(piano_identity(piano_transposed(57, 3), 3), 57);
+    }
+
+    #[test]
+    fn type_1_is_piano_not_a_chord_density() {
+        assert!(ChordType::Single.is_piano());
+        assert!(!ChordType::Triad.is_piano());
+        assert!(!ChordType::Seventh.is_piano());
+    }
+
+    #[test]
+    fn chromatic_dyad_keeps_written_midi() {
+        let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
+        let mut out = Vec::new();
+        eng.handle(
+            EngineEvent::ChromaticOn { key: 57, vel: 100 },
+            0,
+            &mut out,
+        );
+        eng.handle(
+            EngineEvent::ChromaticOn { key: 60, vel: 90 },
+            0,
+            &mut out,
+        );
+        let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
+        assert_eq!(ons, vec![57, 60]);
+    }
+
+    #[test]
+    fn chromatic_sounds_while_strum_is_on() {
+        let mut eng = AudioEngine::new(48_000.0);
+        instant_env(&mut eng);
+        let mut out = Vec::new();
+        eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
+        out.clear();
+        eng.handle(
+            EngineEvent::ChromaticOn { key: 61, vel: 100 },
+            0,
+            &mut out,
+        );
+        assert!(out.iter().any(|n| n.on && n.key == 61));
     }
 
     #[test]

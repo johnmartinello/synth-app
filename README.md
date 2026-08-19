@@ -16,10 +16,10 @@ Dev UI is served on `http://127.0.0.1:1420` so it does not collide with other Ne
 ## Controls
 
 - Pads 1–7 (and computer keys 1–7): diatonic chords in the selected root + scale. Labels show the chord name (or the pitch class in Type 1). Default is a full triad
-- Type / inversion / secondary / octave: rewrite the chord you are holding (1 / tri through 13th; root/1st/2nd/3rd; none, /V, /IV, /vii°)
-- Type 1: each pad plays a single scale tone. Inversion is off. Secondary, arp, and strum still apply to the sounding set (hold several pads to stack degrees). Roll is inert until more than one note is sounding
+- Type / inversion / secondary / octave: rewrite the chord you are holding (tri through 13th; root/1st/2nd/3rd; none, /V, /IV, /vii°)
+- Type 1: piano. MIDI and the on-screen keyboard play the notes you press. Oct shifts that piano relative to 4 (C4 stays C4). Arp/latch walk the held keys. Key, Scale, Inv, Sec, strum, and roll are off
 - Env: DAHDSR next to the pads shapes the hosted output. Sustain is the hold *level* (0 = pluck, high = pad while the key is down). Space and MIDI CC64 keep the gate open; a long Release rings after you let go. A new chord cuts the previous one
-- MIDI: the first hardware input is opened automatically (change it in Config). White keys in any octave map to degrees 1–7 (chords, or a single scale tone in Type 1); Oct− / Oct+ on the controller changes the octave. Other notes are chromatic into Surge
+- MIDI: the first hardware input is opened automatically (change it in Config). In chord types, white keys in any octave map to degrees 1–7; Oct− / Oct+ on the controller changes the octave; other notes are chromatic. In Type 1 every key is piano (the pitch you played)
 - Config: MIDI input and Surge editor / state
 - Keyboard: live piano showing the notes currently sounding (pads, MIDI, arp, strum, sustain)
 - Strum mode (optional): compact string plate; pads only choose a chord; drag the strings or the MIDI mod touchbar (CC1) to play
