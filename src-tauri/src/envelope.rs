@@ -173,6 +173,25 @@ impl AmpEnvelope {
         None
     }
 
+    /// Restart the envelope for a new strum stroke.
+    ///
+    /// Idle uses the normal Delay→Attack path. Delay is left running. Any other
+    /// stage keeps the current gain and enters Attack, skipping Delay so a
+    /// re-stroke does not duck to silence.
+    pub fn retrigger(&mut self) -> Option<u32> {
+        self.gated = true;
+        self.pending_note_off = false;
+        match self.stage {
+            EnvStage::Idle => self.gate_on(),
+            EnvStage::Delay => None,
+            _ => {
+                self.pending_note_on = false;
+                self.enter_attack();
+                Some(0)
+            }
+        }
+    }
+
     pub fn gate_off(&mut self) -> Option<u32> {
         self.gated = false;
         if self.held {
@@ -643,6 +662,30 @@ mod tests {
         let before = env.level();
         assert!(before > 0.4);
         assert_eq!(env.gate_on(), Some(0));
+        assert_eq!(env.stage(), EnvStage::Attack);
+        assert!((env.level() - before).abs() < 1e-5);
+        assert!(!env.awaiting_note_on());
+    }
+
+    #[test]
+    fn retrigger_from_sustain_keeps_level() {
+        let mut env = env_at(
+            1_000.0,
+            EnvelopeParams {
+                delay: 0.1,
+                attack: 0.1,
+                hold: 0.0,
+                decay: 0.0,
+                sustain: 0.8,
+                release: 0.0,
+            },
+        );
+        env.gate_on();
+        env.advance(200);
+        assert_eq!(env.stage(), EnvStage::Sustain);
+        let before = env.level();
+        assert!((before - 0.8).abs() < 1e-5);
+        assert_eq!(env.retrigger(), Some(0));
         assert_eq!(env.stage(), EnvStage::Attack);
         assert!((env.level() - before).abs() < 1e-5);
         assert!(!env.awaiting_note_on());

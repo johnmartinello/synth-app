@@ -1,0 +1,16 @@
+When generating a Git commit message for this repo (including the Source Control sparkle / suggest commit message), follow Conventional Commits exactly:
+
+<type>[optional scope]: <small description>
+
+Rules:
+- One subject line only. No body, no lists, no "Made with Cursor", no quotes.
+- type (lowercase): feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+- Optional scope in parentheses for the area changed, e.g. (audio), (midi), (ui), (clap)
+- Description: lowercase, imperative mood, about 50–72 characters, no trailing period
+- Match the actual staged diff. Do not mention files unless they are the change.
+
+Examples:
+feat(audio): add metronome count-in before record
+fix(midi): keep arp latch when clock sync is on
+refactor(clap): extract plugin editor into its own module
+chore: bump tauri cli to 2.11
