@@ -299,14 +299,7 @@ pub enum HostCommand {
     SetRoll {
         ms: f32,
     },
-    SetEnvelope {
-        delay: f32,
-        attack: f32,
-        hold: f32,
-        decay: f32,
-        sustain: f32,
-        release: f32,
-    },
+    SetEnvelope(EnvelopeParams),
     MidiLearn {
         param: LearnableParam,
     },
@@ -1048,14 +1041,7 @@ fn push_envelope(prod: &mut Producer<EngineEvent>, envelope: &EnvelopeParams) {
     let env = envelope.sanitized();
     push_engine(
         prod,
-        EngineEvent::SetEnvelope {
-            delay: env.delay,
-            attack: env.attack,
-            hold: env.hold,
-            decay: env.decay,
-            sustain: env.sustain,
-            release: env.release,
-        },
+        EngineEvent::SetEnvelope(env),
     );
 }
 
@@ -2173,23 +2159,8 @@ fn handle_command(
             copy_controls(status, settings, midi_clock.live);
             emit_status(app, status);
         }
-        HostCommand::SetEnvelope {
-            delay,
-            attack,
-            hold,
-            decay,
-            sustain,
-            release,
-        } => {
-            *envelope = EnvelopeParams {
-                delay,
-                attack,
-                hold,
-                decay,
-                sustain,
-                release,
-            }
-            .sanitized();
+        HostCommand::SetEnvelope(params) => {
+            *envelope = params.sanitized();
             push_envelope(prod, envelope);
             copy_envelope(status, envelope);
         }

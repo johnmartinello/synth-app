@@ -11,6 +11,9 @@ export type EnvParams = {
   decay: number;
   sustain: number;
   release: number;
+  attackCurve: number;
+  decayCurve: number;
+  releaseCurve: number;
 };
 
 export const DEFAULT_ENV: EnvParams = {
@@ -20,7 +23,14 @@ export const DEFAULT_ENV: EnvParams = {
   decay: 0.22,
   sustain: 0.85,
   release: 0.28,
+  attackCurve: 0,
+  decayCurve: 0,
+  releaseCurve: 0,
 };
+
+export function mergeEnv(p: Partial<EnvParams> | null | undefined): EnvParams {
+  return { ...DEFAULT_ENV, ...p };
+}
 
 const TIME_MAX = 32;
 const TIME_MIN = 0.001;
@@ -29,6 +39,11 @@ const VIEW_MIN = 2;
 const VIEW_ZOOM_MIN = 0.25;
 const GRAPH_W = 640;
 const GRAPH_H = 220;
+const CURVE_MID_MIN = 0.001;
+const CURVE_MID_MAX = 0.999;
+const CURVE_SAMPLES = 20;
+const AMP_EPS = 1e-4;
+const TIME_EPS = 1e-4;
 
 type Playhead = { stage: number; progress: number; level: number };
 
@@ -52,7 +67,42 @@ export function formatTime(t: number): string {
   return `${t < 10 ? t.toFixed(2) : t.toFixed(1)} s`;
 }
 
-type NodeId = "delay" | "attack" | "hold" | "decay" | "release";
+/** Map normalized time through a monotonic power curve. `0` is linear. */
+export function shapeProgress(t: number, curve: number): number {
+  const x = Math.min(1, Math.max(0, t));
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  if (Math.abs(curve) < 1e-6) return x;
+  const c = Math.min(1, Math.max(-1, curve));
+  const mid = Math.min(CURVE_MID_MAX, Math.max(CURVE_MID_MIN, 0.5 + 0.5 * c));
+  const power = Math.log(mid) / Math.log(0.5);
+  return x ** power;
+}
+
+/** Interpolate start → target. Positive curve raises the halfway amplitude. */
+export function shapedLevel(start: number, target: number, t: number, curve: number): number {
+  if (Math.abs(target - start) < 1e-9) return target;
+  const signed = target >= start ? curve : -curve;
+  return start + (target - start) * shapeProgress(t, signed);
+}
+
+export function curveFromMid(start: number, target: number, mid: number): number {
+  const range = target - start;
+  if (Math.abs(range) < AMP_EPS) return 0;
+  const lo = Math.min(start, target);
+  const hi = Math.max(start, target);
+  const clamped = Math.min(hi, Math.max(lo, mid));
+  const normalized = Math.min(
+    CURVE_MID_MAX,
+    Math.max(CURVE_MID_MIN, (clamped - start) / range),
+  );
+  const signed = 2 * normalized - 1;
+  const curve = target >= start ? signed : -signed;
+  return Math.min(1, Math.max(-1, curve));
+}
+
+type NodeId = "delay" | "attack" | "hold" | "decay" | "sustain" | "release";
+type CurveId = "attackCurve" | "decayCurve" | "releaseCurve";
 type Pt = { x: number; y: number };
 
 type GraphGeom = {
@@ -64,7 +114,7 @@ type GraphGeom = {
   padB: number;
   total: number;
   shelf: number;
-  pts: Record<NodeId | "start" | "sustain", Pt>;
+  pts: Record<NodeId | "start", Pt>;
 };
 
 function fitView(p: EnvParams): number {
@@ -144,37 +194,175 @@ function lerp(a: Pt, b: Pt, t: number): Pt {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }
 
-function playheadPoint(pts: GraphGeom["pts"], play: Playhead | null): Pt | null {
+function yOfAmp(geom: GraphGeom, amp: number): number {
+  const innerH = geom.h - geom.padT - geom.padB;
+  return geom.padT + (1 - amp) * innerH;
+}
+
+function segmentPts(
+  x0: number,
+  x1: number,
+  startAmp: number,
+  endAmp: number,
+  curve: number,
+  yOf: (amp: number) => number,
+  fromT = 0,
+  toT = 1,
+): Pt[] {
+  const span = Math.max(0, toT - fromT);
+  const curved =
+    Math.abs(curve) >= 1e-4 &&
+    Math.abs(endAmp - startAmp) >= AMP_EPS &&
+    Math.abs(x1 - x0) >= 0.5;
+  const n = curved ? Math.max(2, Math.round(CURVE_SAMPLES * Math.max(span, 1e-6))) : 1;
+  const pts: Pt[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = fromT + (span * i) / n;
+    pts.push({
+      x: x0 + (x1 - x0) * t,
+      y: yOf(shapedLevel(startAmp, endAmp, t, curve)),
+    });
+  }
+  return pts;
+}
+
+function appendPts(parts: string[], seg: Pt[]) {
+  for (let i = 1; i < seg.length; i++) {
+    parts.push(`L ${seg[i].x} ${seg[i].y}`);
+  }
+}
+
+function envelopeStroke(pts: GraphGeom["pts"], p: EnvParams, yOf: (amp: number) => number): string {
+  const parts = [`M ${pts.start.x} ${pts.start.y}`, `L ${pts.delay.x} ${pts.delay.y}`];
+  appendPts(parts, segmentPts(pts.delay.x, pts.attack.x, 0, 1, p.attackCurve, yOf));
+  parts.push(`L ${pts.hold.x} ${pts.hold.y}`);
+  appendPts(parts, segmentPts(pts.hold.x, pts.decay.x, 1, p.sustain, p.decayCurve, yOf));
+  parts.push(`L ${pts.sustain.x} ${pts.sustain.y}`);
+  appendPts(parts, segmentPts(pts.sustain.x, pts.release.x, p.sustain, 0, p.releaseCurve, yOf));
+  return parts.join(" ");
+}
+
+function playheadPoint(
+  pts: GraphGeom["pts"],
+  play: Playhead | null,
+  p: EnvParams,
+  yOf: (amp: number) => number,
+): Pt | null {
   if (!play || play.stage <= 0) return null;
   const t = play.progress;
   switch (play.stage) {
     case 1:
       return lerp(pts.start, pts.delay, t);
     case 2:
-      return lerp(pts.delay, pts.attack, t);
+      return {
+        x: pts.delay.x + (pts.attack.x - pts.delay.x) * t,
+        y: yOf(shapedLevel(0, 1, t, p.attackCurve)),
+      };
     case 3:
       return lerp(pts.attack, pts.hold, t);
     case 4:
-      return lerp(pts.hold, pts.decay, t);
+      return {
+        x: pts.hold.x + (pts.decay.x - pts.hold.x) * t,
+        y: yOf(shapedLevel(1, p.sustain, t, p.decayCurve)),
+      };
     case 5:
       return pts.decay;
     case 6:
-      return lerp(pts.sustain, pts.release, t);
+      return {
+        x: pts.sustain.x + (pts.release.x - pts.sustain.x) * t,
+        y: yOf(shapedLevel(p.sustain, 0, t, p.releaseCurve)),
+      };
     default:
       return null;
   }
 }
 
-function traveledPath(pts: GraphGeom["pts"], play: Playhead, head: Pt): string {
+function traveledPath(
+  pts: GraphGeom["pts"],
+  play: Playhead,
+  head: Pt,
+  p: EnvParams,
+  yOf: (amp: number) => number,
+): string {
   const parts = [`M ${pts.start.x} ${pts.start.y}`];
-  const push = (p: Pt) => parts.push(`L ${p.x} ${p.y}`);
-  if (play.stage > 1) push(pts.delay);
-  if (play.stage > 2) push(pts.attack);
-  if (play.stage > 3) push(pts.hold);
-  if (play.stage > 4) push(pts.decay);
-  if (play.stage > 5) push(pts.sustain);
-  push(head);
+  const push = (pt: Pt) => parts.push(`L ${pt.x} ${pt.y}`);
+  if (play.stage === 1) {
+    push(head);
+    return parts.join(" ");
+  }
+  push(pts.delay);
+  if (play.stage === 2) {
+    appendPts(
+      parts,
+      segmentPts(pts.delay.x, pts.attack.x, 0, 1, p.attackCurve, yOf, 0, play.progress),
+    );
+    return parts.join(" ");
+  }
+  appendPts(parts, segmentPts(pts.delay.x, pts.attack.x, 0, 1, p.attackCurve, yOf));
+  if (play.stage === 3) {
+    push(head);
+    return parts.join(" ");
+  }
+  push(pts.hold);
+  if (play.stage === 4) {
+    appendPts(
+      parts,
+      segmentPts(pts.hold.x, pts.decay.x, 1, p.sustain, p.decayCurve, yOf, 0, play.progress),
+    );
+    return parts.join(" ");
+  }
+  appendPts(parts, segmentPts(pts.hold.x, pts.decay.x, 1, p.sustain, p.decayCurve, yOf));
+  if (play.stage === 5) {
+    push(head);
+    return parts.join(" ");
+  }
+  push(pts.decay);
+  push(pts.sustain);
+  appendPts(
+    parts,
+    segmentPts(pts.sustain.x, pts.release.x, p.sustain, 0, p.releaseCurve, yOf, 0, play.progress),
+  );
   return parts.join(" ");
+}
+
+function curveHandle(
+  id: CurveId,
+  pts: GraphGeom["pts"],
+  p: EnvParams,
+  yOf: (amp: number) => number,
+): Pt | null {
+  if (id === "attackCurve") {
+    if (p.attack < TIME_EPS) return null;
+    return {
+      x: (pts.delay.x + pts.attack.x) / 2,
+      y: yOf(shapedLevel(0, 1, 0.5, p.attackCurve)),
+    };
+  }
+  if (id === "decayCurve") {
+    if (p.decay < TIME_EPS || Math.abs(1 - p.sustain) < AMP_EPS) return null;
+    return {
+      x: (pts.hold.x + pts.decay.x) / 2,
+      y: yOf(shapedLevel(1, p.sustain, 0.5, p.decayCurve)),
+    };
+  }
+  if (p.release < TIME_EPS || p.sustain < AMP_EPS) return null;
+  return {
+    x: (pts.sustain.x + pts.release.x) / 2,
+    y: yOf(shapedLevel(p.sustain, 0, 0.5, p.releaseCurve)),
+  };
+}
+
+function clientToAmp(
+  svg: SVGSVGElement,
+  clientY: number,
+  h: number,
+  padT: number,
+  padB: number,
+): number {
+  const rect = svg.getBoundingClientRect();
+  const y = ((clientY - rect.top) / Math.max(1, rect.height)) * h;
+  const innerH = h - padT - padB;
+  return Math.min(1, Math.max(0, 1 - (y - padT) / innerH));
 }
 
 export function EnvelopePanel({
@@ -210,7 +398,12 @@ export function EnvelopePanel({
 
   return (
     <div className="env-panel">
-      <EnvGraph params={params} onChange={onChange} playhead={playhead} />
+      <EnvGraph
+        params={params}
+        onChange={onChange}
+        playhead={playhead}
+        onGestureChange={onGestureChange}
+      />
       <div className="hw-knobs env-knobs">
         <HwKnob
           label="Delay"
@@ -287,10 +480,12 @@ function EnvGraph({
   params,
   onChange,
   playhead,
+  onGestureChange,
 }: {
   params: EnvParams;
   onChange: (next: EnvParams) => void;
   playhead: Playhead | null;
+  onGestureChange?: (dragging: boolean) => void;
 }) {
   const fit = useMemo(() => fitView(params), [params]);
   const [viewSec, setViewSec] = useState<number | null>(null);
@@ -298,30 +493,30 @@ function EnvGraph({
   const geom = useMemo(() => geometry(params, totalView), [params, totalView]);
   const svgRef = useRef<SVGSVGElement>(null);
   const viewRef = useRef(totalView);
-  viewRef.current = totalView;
-  const drag = useRef<{
-    id: NodeId;
-    x: number;
-    y: number;
-    params: EnvParams;
-    total: number;
-    innerW: number;
-    innerH: number;
-  } | null>(null);
+  useEffect(() => {
+    viewRef.current = totalView;
+  }, [totalView]);
+  const drag = useRef<
+    | {
+        kind: "node";
+        id: NodeId;
+        x: number;
+        y: number;
+        params: EnvParams;
+        total: number;
+        innerW: number;
+        innerH: number;
+      }
+    | { kind: "curve"; id: CurveId; params: EnvParams }
+    | null
+  >(null);
   const { pts, w, h, padL, padR, padT, padB, total } = geom;
   const innerW = w - padL - padR;
-  const d = [
-    `M ${pts.start.x} ${pts.start.y}`,
-    `L ${pts.delay.x} ${pts.delay.y}`,
-    `L ${pts.attack.x} ${pts.attack.y}`,
-    `L ${pts.hold.x} ${pts.hold.y}`,
-    `L ${pts.decay.x} ${pts.decay.y}`,
-    `L ${pts.sustain.x} ${pts.sustain.y}`,
-    `L ${pts.release.x} ${pts.release.y}`,
-  ].join(" ");
+  const yOf = (amp: number) => yOfAmp(geom, amp);
+  const d = envelopeStroke(pts, params, yOf);
   const fill = `${d} L ${pts.release.x} ${h - padB} L ${pts.start.x} ${h - padB} Z`;
-  const head = playheadPoint(pts, playhead);
-  const live = playhead && head ? traveledPath(pts, playhead, head) : null;
+  const head = playheadPoint(pts, playhead, params, yOf);
+  const live = playhead && head ? traveledPath(pts, playhead, head, params, yOf) : null;
   const liveFill = live
     ? `${live} L ${head!.x} ${h - padB} L ${pts.start.x} ${h - padB} Z`
     : null;
@@ -333,8 +528,14 @@ function EnvGraph({
     ["attack", pts.attack],
     ["hold", pts.hold],
     ["decay", pts.decay],
+    ["sustain", pts.sustain],
     ["release", pts.release],
   ];
+  const curves: Array<[CurveId, Pt]> = (
+    ["attackCurve", "decayCurve", "releaseCurve"] as CurveId[]
+  )
+    .map((id) => [id, curveHandle(id, pts, params, yOf)] as const)
+    .filter((entry): entry is [CurveId, Pt] => entry[1] !== null);
   const step = tickStep(total);
   const labelEvery = total > 16 ? 2 : total > 8 ? 1 : step;
 
@@ -355,9 +556,26 @@ function EnvGraph({
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  const endDrag = () => {
+    if (!drag.current) return;
+    drag.current = null;
+    onGestureChange?.(false);
+  };
+
   const applyDrag = (clientX: number, clientY: number) => {
     const start = drag.current;
     if (!start) return;
+    if (start.kind === "curve") {
+      const svg = svgRef.current;
+      if (!svg) return;
+      const amp = clientToAmp(svg, clientY, h, padT, padB);
+      const next = { ...start.params };
+      if (start.id === "attackCurve") next.attackCurve = curveFromMid(0, 1, amp);
+      if (start.id === "decayCurve") next.decayCurve = curveFromMid(1, start.params.sustain, amp);
+      if (start.id === "releaseCurve") next.releaseCurve = curveFromMid(start.params.sustain, 0, amp);
+      onChange(next);
+      return;
+    }
     const dt = ((clientX - start.x) / start.innerW) * start.total;
     const damp = -((clientY - start.y) / start.innerH);
     const next = { ...start.params };
@@ -367,6 +585,9 @@ function EnvGraph({
     if (start.id === "hold") next.hold = clampT(start.params.hold + dt);
     if (start.id === "decay") {
       next.decay = clampT(start.params.decay + dt);
+      next.sustain = Math.min(1, Math.max(0, start.params.sustain + damp));
+    }
+    if (start.id === "sustain") {
       next.sustain = Math.min(1, Math.max(0, start.params.sustain + damp));
     }
     if (start.id === "release") next.release = clampT(start.params.release + dt);
@@ -387,12 +608,9 @@ function EnvGraph({
       aria-label="DAHDSR envelope"
       onDoubleClick={() => setViewSec(null)}
       onPointerMove={(e) => applyDrag(e.clientX, e.clientY)}
-      onPointerUp={() => {
-        drag.current = null;
-      }}
-      onPointerCancel={() => {
-        drag.current = null;
-      }}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
     >
       {ticks(total).map((t) => {
         const x = padL + (t / total) * innerW;
@@ -466,12 +684,13 @@ function EnvGraph({
           cx={p.x}
           cy={p.y}
           r={5}
-          className="env-node"
+          className={id === "sustain" ? "env-node env-node-y" : "env-node"}
           onPointerDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
             e.currentTarget.ownerSVGElement?.setPointerCapture(e.pointerId);
             drag.current = {
+              kind: "node",
               id,
               x: e.clientX,
               y: e.clientY,
@@ -480,6 +699,25 @@ function EnvGraph({
               innerW,
               innerH: h - padT - padB,
             };
+            onGestureChange?.(true);
+          }}
+        />
+      ))}
+      {curves.map(([id, p]) => (
+        <rect
+          key={id}
+          x={p.x - 3.5}
+          y={p.y - 3.5}
+          width={7}
+          height={7}
+          transform={`rotate(45 ${p.x} ${p.y})`}
+          className="env-curve"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.currentTarget.ownerSVGElement?.setPointerCapture(e.pointerId);
+            drag.current = { kind: "curve", id, params };
+            onGestureChange?.(true);
           }}
         />
       ))}

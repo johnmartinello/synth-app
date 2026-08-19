@@ -14,6 +14,7 @@ pub enum EnvStage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnvelopeParams {
     pub delay: f32,
     pub attack: f32,
@@ -21,6 +22,12 @@ pub struct EnvelopeParams {
     pub decay: f32,
     pub sustain: f32,
     pub release: f32,
+    #[serde(default)]
+    pub attack_curve: f32,
+    #[serde(default)]
+    pub decay_curve: f32,
+    #[serde(default)]
+    pub release_curve: f32,
 }
 
 impl Default for EnvelopeParams {
@@ -32,6 +39,9 @@ impl Default for EnvelopeParams {
             decay: 0.22,
             sustain: 0.85,
             release: 0.28,
+            attack_curve: 0.0,
+            decay_curve: 0.0,
+            release_curve: 0.0,
         }
     }
 }
@@ -45,8 +55,42 @@ impl EnvelopeParams {
             decay: self.decay.clamp(0.0, 32.0),
             sustain: self.sustain.clamp(0.0, 1.0),
             release: self.release.clamp(0.0, 32.0),
+            attack_curve: self.attack_curve.clamp(-1.0, 1.0),
+            decay_curve: self.decay_curve.clamp(-1.0, 1.0),
+            release_curve: self.release_curve.clamp(-1.0, 1.0),
         }
     }
+}
+
+const CURVE_MID_MIN: f32 = 0.001;
+const CURVE_MID_MAX: f32 = 0.999;
+
+/// Map normalized time `t` through a monotonic power curve.
+/// `0` is linear; negative/positive pull the halfway value below/above 0.5.
+pub fn shape_progress(t: f32, curve: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    if curve.abs() < 1e-6 {
+        return t;
+    }
+    let mid = (0.5 + 0.5 * curve.clamp(-1.0, 1.0)).clamp(CURVE_MID_MIN, CURVE_MID_MAX);
+    let power = mid.ln() / 0.5_f32.ln();
+    t.powf(power)
+}
+
+/// Interpolate `start` → `target` with a Vital-style bend.
+/// Positive `curve` raises the halfway amplitude above the straight-line midpoint.
+pub fn shaped_level(start: f32, target: f32, t: f32, curve: f32) -> f32 {
+    if (target - start).abs() < 1e-9 {
+        return target;
+    }
+    let signed = if target >= start { curve } else { -curve };
+    start + (target - start) * shape_progress(t, signed)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -360,7 +404,13 @@ impl AmpEnvelope {
             return target;
         }
         let done = (self.stage_len - self.stage_remain) as f32 / self.stage_len as f32;
-        self.stage_start + (target - self.stage_start) * done
+        let curve = match self.stage {
+            EnvStage::Attack => self.params.attack_curve,
+            EnvStage::Decay => self.params.decay_curve,
+            EnvStage::Release => self.params.release_curve,
+            _ => 0.0,
+        };
+        shaped_level(self.stage_start, target, done, curve)
     }
 
     fn emit_note_on(&mut self, slot: &mut Option<u32>, at: u32) {
@@ -465,19 +515,28 @@ mod tests {
         env
     }
 
+    fn params(
+        delay: f32,
+        attack: f32,
+        hold: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+    ) -> EnvelopeParams {
+        EnvelopeParams {
+            delay,
+            attack,
+            hold,
+            decay,
+            sustain,
+            release,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn delay_defers_note_on() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.1,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.0,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.1, 0.0, 0.0, 0.0, 1.0, 0.0));
         assert_eq!(env.gate_on(), None);
         assert!(env.awaiting_note_on());
         let tick = env.advance(50);
@@ -491,17 +550,7 @@ mod tests {
 
     #[test]
     fn release_defers_note_off() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.0, 0.0, 0.0, 0.0, 1.0, 0.2));
         assert_eq!(env.gate_on(), Some(0));
         env.advance(10);
         assert_eq!(env.gate_off(), None);
@@ -517,17 +566,7 @@ mod tests {
 
     #[test]
     fn hold_keeps_sustain() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 0.7,
-                release: 0.1,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.0, 0.0, 0.0, 0.0, 0.7, 0.1));
         env.gate_on();
         env.advance(5);
         env.set_hold(true);
@@ -543,17 +582,7 @@ mod tests {
 
     #[test]
     fn sustain_zero_is_silent_after_decay() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.05,
-                sustain: 0.0,
-                release: 0.0,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.0, 0.0, 0.0, 0.05, 0.0, 0.0));
         env.gate_on();
         let tick = env.advance(20);
         assert!(tick.start_gain > 0.5);
@@ -565,17 +594,7 @@ mod tests {
 
     #[test]
     fn playhead_tracks_attack_then_sustain() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 0.6,
-                release: 0.0,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.0, 0.1, 0.0, 0.0, 0.6, 0.0));
         env.gate_on();
         let (stage, progress, _) = env.playhead();
         assert_eq!(stage, 2);
@@ -592,17 +611,7 @@ mod tests {
 
     #[test]
     fn zero_times_are_immediate() {
-        let mut env = env_at(
-            48_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.0,
-            },
-        );
+        let mut env = env_at(48_000.0, params(0.0, 0.0, 0.0, 0.0, 1.0, 0.0));
         assert_eq!(env.gate_on(), Some(0));
         assert_eq!(env.stage(), EnvStage::Sustain);
         assert_eq!(env.level(), 1.0);
@@ -612,17 +621,7 @@ mod tests {
 
     #[test]
     fn retrigger_from_release_keeps_level() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.0,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.0, 0.1, 0.0, 0.0, 1.0, 0.2));
         env.gate_on();
         env.advance(100);
         assert_eq!(env.stage(), EnvStage::Sustain);
@@ -643,17 +642,7 @@ mod tests {
 
     #[test]
     fn retrigger_from_release_skips_delay() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.1,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.1, 0.1, 0.0, 0.0, 1.0, 0.2));
         env.gate_on();
         env.advance(200);
         assert_eq!(env.stage(), EnvStage::Sustain);
@@ -669,17 +658,7 @@ mod tests {
 
     #[test]
     fn retrigger_from_sustain_keeps_level() {
-        let mut env = env_at(
-            1_000.0,
-            EnvelopeParams {
-                delay: 0.1,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 0.8,
-                release: 0.0,
-            },
-        );
+        let mut env = env_at(1_000.0, params(0.1, 0.1, 0.0, 0.0, 0.8, 0.0));
         env.gate_on();
         env.advance(200);
         assert_eq!(env.stage(), EnvStage::Sustain);
@@ -689,5 +668,110 @@ mod tests {
         assert_eq!(env.stage(), EnvStage::Attack);
         assert!((env.level() - before).abs() < 1e-5);
         assert!(!env.awaiting_note_on());
+    }
+
+    #[test]
+    fn shape_progress_is_linear_at_zero() {
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert!((shape_progress(t, 0.0) - t).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn shape_progress_keeps_endpoints() {
+        for curve in [-1.0, -0.6, 0.0, 0.6, 1.0] {
+            assert_eq!(shape_progress(0.0, curve), 0.0);
+            assert_eq!(shape_progress(1.0, curve), 1.0);
+            let mid = shape_progress(0.5, curve);
+            assert!(mid.is_finite());
+            if curve > 0.0 {
+                assert!(mid > 0.5);
+            } else if curve < 0.0 {
+                assert!(mid < 0.5);
+            } else {
+                assert!((mid - 0.5).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn shape_progress_is_monotonic_and_finite() {
+        for curve in [-1.0, -0.4, 0.0, 0.4, 1.0] {
+            let mut prev = -1.0;
+            for i in 0..=32 {
+                let t = i as f32 / 32.0;
+                let y = shape_progress(t, curve);
+                assert!(y.is_finite(), "non-finite at t={t} curve={curve}");
+                assert!(y + 1e-5 >= prev, "non-monotonic at t={t} curve={curve}");
+                prev = y;
+            }
+        }
+    }
+
+    #[test]
+    fn shaped_level_positive_curve_raises_midpoint() {
+        let up = shaped_level(0.0, 1.0, 0.5, 0.6);
+        assert!(up > 0.5);
+        let down = shaped_level(1.0, 0.0, 0.5, 0.6);
+        assert!(down > 0.5);
+    }
+
+    #[test]
+    fn sanitizes_curve_amounts() {
+        let p = EnvelopeParams {
+            attack_curve: 4.0,
+            decay_curve: -3.0,
+            release_curve: 0.2,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(p.attack_curve, 1.0);
+        assert_eq!(p.decay_curve, -1.0);
+        assert!((p.release_curve - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shaped_attack_bends_above_linear() {
+        let mut p = params(0.0, 0.1, 0.0, 0.0, 1.0, 0.0);
+        p.attack_curve = 0.7;
+        let mut env = env_at(1_000.0, p);
+        env.gate_on();
+        env.advance(50);
+        assert_eq!(env.stage(), EnvStage::Attack);
+        assert!(env.level() > 0.6);
+        env.advance(50);
+        assert!((env.level() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn shaped_decay_bends_above_linear() {
+        let mut p = params(0.0, 0.0, 0.0, 0.1, 0.0, 0.0);
+        p.decay_curve = 0.7;
+        let mut env = env_at(1_000.0, p);
+        env.gate_on();
+        env.advance(50);
+        assert_eq!(env.stage(), EnvStage::Decay);
+        assert!(env.level() > 0.6);
+        env.advance(50);
+        assert!(env.level() < 0.05);
+    }
+
+    #[test]
+    fn shaped_release_from_partial_level() {
+        let mut p = params(0.0, 0.0, 0.0, 0.0, 0.8, 0.2);
+        p.release_curve = 0.8;
+        let mut env = env_at(1_000.0, p);
+        env.gate_on();
+        env.advance(10);
+        env.gate_off();
+        env.advance(100);
+        let mid = env.level();
+        assert!(
+            mid > 0.5 && mid < 0.8,
+            "curved mid-release from 0.8 was {mid}"
+        );
+        env.advance(100);
+        assert!(env.is_idle());
+        assert_eq!(env.level(), 0.0);
     }
 }

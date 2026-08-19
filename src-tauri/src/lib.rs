@@ -195,7 +195,7 @@ fn set_roll(state: tauri::State<AppState>, ms: f32) -> Result<(), String> {
     send_cmd(&state, HostCommand::SetRoll { ms })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn set_envelope(
     state: tauri::State<AppState>,
     delay: f32,
@@ -204,17 +204,23 @@ fn set_envelope(
     decay: f32,
     sustain: f32,
     release: f32,
+    attack_curve: Option<f32>,
+    decay_curve: Option<f32>,
+    release_curve: Option<f32>,
 ) -> Result<(), String> {
     send_cmd(
         &state,
-        HostCommand::SetEnvelope {
+        HostCommand::SetEnvelope(EnvelopeParams {
             delay,
             attack,
             hold,
             decay,
             sustain,
             release,
-        },
+            attack_curve: attack_curve.unwrap_or(0.0),
+            decay_curve: decay_curve.unwrap_or(0.0),
+            release_curve: release_curve.unwrap_or(0.0),
+        }),
     )
 }
 

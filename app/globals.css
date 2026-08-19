@@ -848,6 +848,22 @@ input {
   cursor: grab;
 }
 
+.env-node-y {
+  cursor: ns-resize;
+}
+
+.env-node:active,
+.env-curve:active {
+  cursor: grabbing;
+}
+
+.env-curve {
+  fill: var(--cream);
+  stroke: #1a1208;
+  stroke-width: 1;
+  cursor: ns-resize;
+}
+
 .env-knobs {
   flex: 0 0 auto;
   display: grid;

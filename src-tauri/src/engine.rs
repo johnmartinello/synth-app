@@ -1,5 +1,6 @@
 //! Chord / voicing / arp / strum. Emits MIDI note numbers only; the host turns them into CLAP events.
 
+use crate::envelope::EnvelopeParams;
 use crate::looper::LooperEvent;
 use crate::metronome::MetronomeEvent;
 use serde::{Deserialize, Serialize};
@@ -117,14 +118,7 @@ pub enum EngineEvent {
     RollSet {
         ms_x10: u16,
     },
-    SetEnvelope {
-        delay: f32,
-        attack: f32,
-        hold: f32,
-        decay: f32,
-        sustain: f32,
-        release: f32,
-    },
+    SetEnvelope(EnvelopeParams),
     Looper(LooperEvent),
     Metronome(MetronomeEvent),
     /// Channel MIDI forwarded straight to the plugin (Surge-focused).
@@ -663,22 +657,8 @@ impl AudioEngine {
             EngineEvent::RollSet { ms_x10 } => {
                 self.roll_ms = sanitize_roll_ms(ms_x10 as f32 / 10.0);
             }
-            EngineEvent::SetEnvelope {
-                delay,
-                attack,
-                hold,
-                decay,
-                sustain,
-                release,
-            } => {
-                self.env.set_params(crate::envelope::EnvelopeParams {
-                    delay,
-                    attack,
-                    hold,
-                    decay,
-                    sustain,
-                    release,
-                });
+            EngineEvent::SetEnvelope(params) => {
+                self.env.set_params(params);
             }
             EngineEvent::Looper(_) => {}
             EngineEvent::Metronome(_) => {}
@@ -1253,6 +1233,25 @@ impl AudioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_event(
+        delay: f32,
+        attack: f32,
+        hold: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+    ) -> EngineEvent {
+        EngineEvent::SetEnvelope(EnvelopeParams {
+            delay,
+            attack,
+            hold,
+            decay,
+            sustain,
+            release,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn c_major_triad() {
@@ -1964,18 +1963,7 @@ mod tests {
     fn strum_release_defers_note_off() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.0, 0.0, 0.0, 0.0, 1.0, 0.2), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
@@ -2046,18 +2034,7 @@ mod tests {
 
     fn slow_strum_env(eng: &mut AudioEngine) {
         let mut sink = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-            0,
-            &mut sink,
-        );
+        eng.handle(env_event(0.0, 0.1, 0.0, 0.0, 1.0, 0.2), 0, &mut sink);
     }
 
     fn arm_and_strum(eng: &mut AudioEngine, notes: [u8; MAX_CHORD_NOTES], len: u8, out: &mut Vec<GeneratedNote>) {
@@ -2205,18 +2182,7 @@ mod tests {
     fn strum_delay_starts_at_first_cross() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.1,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.0,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.1, 0.0, 0.0, 0.0, 1.0, 0.0), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
@@ -2248,18 +2214,7 @@ mod tests {
 
     fn instant_env(eng: &mut AudioEngine) {
         let mut sink = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.0,
-            },
-            0,
-            &mut sink,
-        );
+        eng.handle(env_event(0.0, 0.0, 0.0, 0.0, 1.0, 0.0), 0, &mut sink);
     }
 
     fn triad() -> ([u8; MAX_CHORD_NOTES], u8) {
@@ -2411,18 +2366,7 @@ mod tests {
     fn delay_defers_chord_on() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.1,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.0,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.1, 0.0, 0.0, 0.0, 1.0, 0.0), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         assert!(out.iter().all(|n| !n.on));
@@ -2439,18 +2383,7 @@ mod tests {
     fn release_defers_chord_off() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.0, 0.0, 0.0, 0.0, 1.0, 0.2), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         out.clear();
@@ -2469,18 +2402,7 @@ mod tests {
     fn sustain_hold_keeps_envelope_then_releases() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.0,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 0.8,
-                release: 0.1,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.0, 0.0, 0.0, 0.0, 0.8, 0.1), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::Sustain { on: true }, 0, &mut out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
@@ -2503,18 +2425,7 @@ mod tests {
     fn chord_on_during_release_keeps_env_level() {
         let mut eng = AudioEngine::new(1_000.0);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::SetEnvelope {
-                delay: 0.0,
-                attack: 0.1,
-                hold: 0.0,
-                decay: 0.0,
-                sustain: 1.0,
-                release: 0.2,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(env_event(0.0, 0.1, 0.0, 0.0, 1.0, 0.2), 0, &mut out);
         let (notes, len) = triad();
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         eng.process_clock(100, &mut out);

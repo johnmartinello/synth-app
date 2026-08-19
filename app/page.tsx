@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { DEFAULT_ENV, EnvelopePanel, type EnvParams } from "./envelope";
+import { DEFAULT_ENV, EnvelopePanel, mergeEnv, type EnvParams } from "./envelope";
 import { HwButton, HwDragValue, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
 type FilterType = "lp" | "hp" | "bp" | "notch";
@@ -288,7 +288,7 @@ export default function Home() {
         if (next.filter_type) setFilterType(parseFilterType(next.filter_type));
         if (typeof next.filter_res === "number") setFilterRes(next.filter_res);
         if (typeof next.roll_ms === "number") setRollMs(next.roll_ms);
-        if (next.envelope) setEnv(next.envelope);
+        if (next.envelope) setEnv(mergeEnv(next.envelope));
         if (next.looper) setLooper(next.looper);
         if (next.metronome) setMetro(next.metronome);
       } catch {
@@ -314,7 +314,7 @@ export default function Home() {
             setRollMs(next.roll_ms);
           }
           if (next.envelope && !envGesture.current) {
-            setEnv(next.envelope);
+            setEnv(mergeEnv(next.envelope));
           }
           if (next.looper && levelGesture.current == null) {
             setLooper(next.looper);
