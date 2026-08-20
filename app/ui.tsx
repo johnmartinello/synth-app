@@ -1,17 +1,29 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
   useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
+  type HTMLAttributes,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 
-export function Silk({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <span className={`silk ${className}`}>{children}</span>;
+export function Silk({
+  children,
+  className = "",
+  ...props
+}: HTMLAttributes<HTMLSpanElement> & { children: ReactNode }) {
+  return (
+    <span className={`silk ${className}`} {...props}>
+      {children}
+    </span>
+  );
 }
 
 export function HwButton({
@@ -20,12 +32,17 @@ export function HwButton({
   type = "button",
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { on?: boolean }) {
+  const { role, ...rest } = props;
+  const pressed =
+    role === "radio" || "aria-pressed" in props || "aria-expanded" in props ? undefined : on;
   return (
     <button
       type={type}
       data-on={on ? "true" : undefined}
+      aria-pressed={pressed}
+      role={role}
       className={`hw-btn ${className}`}
-      {...props}
+      {...rest}
     />
   );
 }
@@ -36,15 +53,17 @@ export function HwToggle({
   disabled,
   onClick,
   className = "",
+  title,
 }: {
   on: boolean;
   children: ReactNode;
   disabled?: boolean;
   onClick: () => void;
   className?: string;
+  title?: string;
 }) {
   return (
-    <HwButton on={on} disabled={disabled} onClick={onClick} className={className}>
+    <HwButton on={on} disabled={disabled} onClick={onClick} className={className} title={title}>
       {children}
     </HwButton>
   );
@@ -52,30 +71,40 @@ export function HwToggle({
 
 export function HwToggleGroup({
   label,
+  ariaLabel,
   value,
   options,
   onChange,
   disabledIds = [],
 }: {
   label?: string;
+  ariaLabel?: string;
   value: string;
   options: ReadonlyArray<readonly [string, string]>;
   onChange: (v: string) => void;
   disabledIds?: readonly string[];
 }) {
+  const labelId = useId();
   return (
-    <div className="hw-row">
-      {label ? <Silk>{label}</Silk> : null}
+    <div
+      className="hw-row"
+      role="radiogroup"
+      aria-labelledby={label ? labelId : undefined}
+      aria-label={!label ? ariaLabel : undefined}
+    >
+      {label ? <Silk id={labelId}>{label}</Silk> : null}
       <div className="hw-cluster">
         {options.map(([id, name]) => (
-          <HwToggle
+          <HwButton
             key={id}
+            role="radio"
+            aria-checked={value === id}
             on={value === id}
             disabled={disabledIds.includes(id)}
             onClick={() => onChange(id)}
           >
             {name}
-          </HwToggle>
+          </HwButton>
         ))}
       </div>
     </div>
@@ -96,8 +125,24 @@ export function HwMenu({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const activeRef = useRef(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const labelId = useId();
   const current = options.find(([v]) => v === value)?.[1] ?? value;
+
+  const moveActive = useCallback((next: number) => {
+    const clamped = Math.min(options.length - 1, Math.max(0, next));
+    activeRef.current = clamped;
+    setActive(clamped);
+  }, [options.length]);
+
+  const openMenu = () => {
+    const selected = options.findIndex(([v]) => v === value);
+    moveActive(selected < 0 ? 0 : selected);
+    setOpen(true);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -105,31 +150,84 @@ export function HwMenu({
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === "Escape") setOpen(false);
+      if (e.code === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setOpen(false);
+        return;
+      }
+      if (e.code === "ArrowDown") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        moveActive(activeRef.current + 1);
+        return;
+      }
+      if (e.code === "ArrowUp") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        moveActive(activeRef.current - 1);
+        return;
+      }
+      if (e.code === "Home") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        moveActive(0);
+        return;
+      }
+      if (e.code === "End") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        moveActive(options.length - 1);
+        return;
+      }
+      if (e.code === "Enter" || e.code === "Space") {
+        const pick = options[activeRef.current];
+        if (!pick) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onChange(pick[0]);
+        setOpen(false);
+      }
     };
     window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
     };
-  }, [open]);
+  }, [open, options, onChange, moveActive]);
 
   return (
     <div className={`hw-row ${className}`} ref={rootRef}>
-      {label ? <Silk>{label}</Silk> : null}
+      {label ? <Silk id={labelId}>{label}</Silk> : null}
       <div className="hw-menu">
-        <HwButton on={open} onClick={() => setOpen((v) => !v)}>
+        <HwButton
+          on={open}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-controls={listId}
+          aria-labelledby={label ? labelId : undefined}
+          onClick={() => (open ? setOpen(false) : openMenu())}
+        >
           {current || "—"}
         </HwButton>
         {open && (
-          <ul className="hw-menu-list" role="listbox">
-            {options.map(([v, n]) => (
-              <li key={v || "empty"}>
+          <ul
+            id={listId}
+            className="hw-menu-list"
+            role="listbox"
+            aria-activedescendant={`${listId}-${active}`}
+          >
+            {options.map(([v, n], i) => (
+              <li key={v || "empty"} role="none">
                 <button
                   type="button"
+                  id={`${listId}-${i}`}
+                  role="option"
+                  aria-selected={v === value}
                   className="hw-menu-item"
                   data-on={v === value ? "true" : undefined}
+                  data-active={i === active ? "true" : undefined}
                   onClick={() => {
                     onChange(v);
                     setOpen(false);
@@ -140,6 +238,66 @@ export function HwMenu({
               </li>
             ))}
           </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function HwFlyout({
+  label,
+  summary,
+  children,
+  className = "",
+}: {
+  label?: string;
+  summary: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const labelId = useId();
+  const panelId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
+
+  return (
+    <div className={`hw-row ${className}`} ref={rootRef}>
+      {label ? <Silk id={labelId}>{label}</Silk> : null}
+      <div className="hw-menu">
+        <HwButton
+          on={open}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          aria-controls={panelId}
+          aria-labelledby={label ? labelId : undefined}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {summary}
+        </HwButton>
+        {open && (
+          <div id={panelId} className="hw-flyout-panel" role="dialog">
+            {children}
+          </div>
         )}
       </div>
     </div>
@@ -208,45 +366,123 @@ export type HwKnobMidi = {
   onClear: () => void;
 };
 
-function midiChipLabel(midi: HwKnobMidi) {
-  if (midi.learning) return "Learn";
-  if (midi.mapped) return midi.mapped;
-  return "MIDI";
+function useMidiMenu(midi?: HwKnobMidi, label?: string) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+
+  const bind = midi
+    ? {
+        title: midi.mapped
+          ? `${label ?? midi.paramId} · ${midi.mapped}. Right-click for MIDI learn`
+          : midi.learning
+            ? `Learning ${label ?? midi.paramId}. Right-click to cancel`
+            : "Right-click for MIDI learn",
+        onContextMenu: (e: ReactMouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const w = 11 * 16;
+          const h = midi.mapped ? 72 : 40;
+          setPos({
+            x: Math.min(Math.max(8, e.clientX), window.innerWidth - w - 8),
+            y: Math.min(Math.max(8, e.clientY), window.innerHeight - h - 8),
+          });
+        },
+      }
+    : {};
+
+  const menu =
+    midi && pos
+      ? createPortal(
+          <MidiLearnMenu
+            midi={midi}
+            label={label}
+            x={pos.x}
+            y={pos.y}
+            onClose={() => setPos(null)}
+          />,
+          document.body,
+        )
+      : null;
+
+  return {
+    bind,
+    menu,
+    mapped: Boolean(midi?.mapped && !midi.learning),
+    learning: Boolean(midi?.learning),
+  };
 }
 
-export function HwMidiChip({
+function MidiLearnMenu({
   midi,
   label,
+  x,
+  y,
+  onClose,
 }: {
   midi: HwKnobMidi;
   label?: string;
+  x: number;
+  y: number;
+  onClose: () => void;
 }) {
-  return (
-    <button
-      type="button"
-      className="hw-midi-chip"
-      data-on={midi.learning ? "true" : undefined}
-      data-mapped={midi.mapped && !midi.learning ? "true" : undefined}
-      aria-label={
-        midi.learning
-          ? `Cancel MIDI learn for ${label ?? midi.paramId}`
-          : midi.mapped
-            ? `${label ?? midi.paramId} mapped to ${midi.mapped}. Click to relearn, right-click to clear.`
-            : `MIDI learn ${label ?? midi.paramId}`
+  const rootRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onClose();
       }
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        midi.onLearn();
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        midi.onClear();
-      }}
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [onClose]);
+
+  const name = label ?? midi.paramId;
+  return (
+    <ul
+      ref={rootRef}
+      className="hw-ctx-menu"
+      role="menu"
+      style={{ left: x, top: y }}
+      aria-label={`MIDI for ${name}`}
     >
-      {midiChipLabel(midi)}
-    </button>
+      <li role="none">
+        <button
+          type="button"
+          role="menuitem"
+          className="hw-ctx-item"
+          onClick={() => {
+            midi.onLearn();
+            onClose();
+          }}
+        >
+          {midi.learning ? "Cancel MIDI learn" : "MIDI learn"}
+        </button>
+      </li>
+      {midi.mapped ? (
+        <li role="none">
+          <button
+            type="button"
+            role="menuitem"
+            className="hw-ctx-item"
+            onClick={() => {
+              midi.onClear();
+              onClose();
+            }}
+          >
+            Clear {midi.mapped}
+          </button>
+        </li>
+      ) : null}
+    </ul>
   );
 }
 
@@ -267,8 +503,14 @@ export function HwStomp({
   midi?: HwKnobMidi;
   className?: string;
 }) {
+  const { bind, menu, mapped, learning } = useMidiMenu(midi);
   return (
-    <div className="hw-stomp">
+    <div
+      className="hw-stomp"
+      data-midi-mapped={mapped ? "true" : undefined}
+      data-midi-learn={learning ? "true" : undefined}
+      {...bind}
+    >
       <HwButton
         on={on}
         disabled={disabled}
@@ -278,7 +520,7 @@ export function HwStomp({
       >
         {children}
       </HwButton>
-      {midi ? <HwMidiChip midi={midi} /> : null}
+      {menu}
     </div>
   );
 }
@@ -313,6 +555,7 @@ export function HwKnob({
   const editRef = useRef<HTMLSpanElement>(null);
   const skipCommit = useRef(false);
   const [editing, setEditing] = useState(false);
+  const { bind, menu, mapped, learning } = useMidiMenu(midi, label);
   const span = Math.max(0.0001, max - min);
   const pct = (value - min) / span;
   const angle = -135 + pct * 270;
@@ -351,7 +594,13 @@ export function HwKnob({
   }, [editing, step, value]);
 
   return (
-    <div className="hw-knob" data-disabled={disabled ? "true" : undefined}>
+    <div
+      className="hw-knob"
+      data-disabled={disabled ? "true" : undefined}
+      data-midi-mapped={mapped ? "true" : undefined}
+      data-midi-learn={learning ? "true" : undefined}
+      {...bind}
+    >
       {label ? <Silk>{label}</Silk> : null}
       <div className="hw-knob-dial">
         <div
@@ -366,7 +615,7 @@ export function HwKnob({
           aria-valuenow={value}
           aria-valuetext={display}
           onPointerDown={(e) => {
-            if (disabled) return;
+            if (disabled || e.button !== 0) return;
             e.preventDefault();
             e.currentTarget.setPointerCapture(e.pointerId);
             drag.current = { y: e.clientY, value };
@@ -419,8 +668,8 @@ export function HwKnob({
         >
           <i className="hw-knob-tick" style={{ "--angle": `${angle}deg` } as CSSProperties} />
         </div>
-        {midi ? <HwMidiChip midi={midi} label={label} /> : null}
       </div>
+      {menu}
       <div className="hw-knob-value-slot">
         {editing ? (
           <span
@@ -479,6 +728,7 @@ type HwDragValueProps = {
   disabled?: boolean;
   onChange: (v: number) => void;
   onGestureChange?: (dragging: boolean) => void;
+  midi?: HwKnobMidi;
 };
 
 export function HwDragValue({
@@ -491,11 +741,13 @@ export function HwDragValue({
   disabled = false,
   onChange,
   onGestureChange,
+  midi,
 }: HwDragValueProps) {
   const editRef = useRef<HTMLSpanElement>(null);
   const skipCommit = useRef(false);
   const drag = useRef<{ x: number; value: number; moved: boolean } | null>(null);
   const [editing, setEditing] = useState(false);
+  const { bind, menu, mapped, learning } = useMidiMenu(midi, label);
 
   const apply = (next: number) => {
     const snapped = snap(next, min, max, step);
@@ -532,7 +784,13 @@ export function HwDragValue({
   }, [editing, step, value]);
 
   return (
-    <div className="hw-drag" data-disabled={disabled ? "true" : undefined}>
+    <div
+      className="hw-drag"
+      data-disabled={disabled ? "true" : undefined}
+      data-midi-mapped={mapped ? "true" : undefined}
+      data-midi-learn={learning ? "true" : undefined}
+      {...bind}
+    >
       {label ? <Silk>{label}</Silk> : null}
       {editing ? (
         <span
@@ -641,6 +899,7 @@ export function HwDragValue({
           {display ?? String(value)}
         </span>
       )}
+      {menu}
     </div>
   );
 }

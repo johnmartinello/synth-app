@@ -38,7 +38,7 @@ const TICK = 0.5;
 const VIEW_MIN = 2;
 const VIEW_ZOOM_MIN = 0.25;
 const GRAPH_W = 640;
-const GRAPH_H = 220;
+const GRAPH_H = 168;
 const CURVE_MID_MIN = 0.001;
 const CURVE_MID_MAX = 0.999;
 const CURVE_SAMPLES = 20;
@@ -397,13 +397,18 @@ export function EnvelopePanel({
   }, []);
 
   return (
-    <div className="env-panel">
-      <EnvGraph
-        params={params}
-        onChange={onChange}
-        playhead={playhead}
-        onGestureChange={onGestureChange}
-      />
+    <div className="env-panel" aria-labelledby="envelope-heading">
+      <div className="env-head">
+        <h3 className="env-title" id="envelope-heading">
+          Envelope
+        </h3>
+        <EnvGraph
+          params={params}
+          onChange={onChange}
+          playhead={playhead}
+          onGestureChange={onGestureChange}
+        />
+      </div>
       <div className="hw-knobs env-knobs">
         <HwKnob
           label="Delay"
@@ -605,7 +610,7 @@ function EnvGraph({
       viewBox={`0 0 ${w} ${h}`}
       preserveAspectRatio="none"
       role="img"
-      aria-label="DAHDSR envelope"
+      aria-label="DAHDSR envelope. Drag nodes to shape. Double-click to reset zoom."
       onDoubleClick={() => setViewSec(null)}
       onPointerMove={(e) => applyDrag(e.clientX, e.clientY)}
       onPointerUp={endDrag}

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { DEFAULT_ENV, EnvelopePanel, mergeEnv, type EnvParams } from "./envelope";
-import { HwButton, HwDragValue, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
+import { HwButton, HwDragValue, HwFlyout, HwKnob, HwMenu, HwStomp, HwToggle, HwToggleGroup, Silk, type HwKnobMidi } from "./ui";
 
 type FilterType = "lp" | "hp" | "bp" | "notch";
 
@@ -236,6 +236,9 @@ export default function Home() {
     if (piano) {
       return engineNotes ?? [];
     }
+    if (strumMode) {
+      return engineNotes ?? [];
+    }
     if (held.size > 0) {
       const all = [...held].flatMap((degree) =>
         chordMidi(root, scale, chordType, inversion, secondary, octave, degree),
@@ -246,6 +249,7 @@ export default function Home() {
     return [];
   }, [
     piano,
+    strumMode,
     engineNotes,
     held,
     root,
@@ -560,38 +564,42 @@ export default function Home() {
   const missing = status && !status.surge.found;
 
   return (
-    <div className="flex min-h-screen flex-col px-5 py-4 md:px-7">
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">Surge Chord</h1>
-        <div className="flex items-center gap-2">
-          {status?.editor_open && (
-            <Silk>
-              MIDI {status.midi_sink === "surge" ? "→ Surge" : "→ Chord"}
-            </Silk>
-          )}
-          <HwButton
-            className="hw-btn-icon"
-            aria-label="Config"
-            onClick={() => {
-              setHeld(new Set());
-              setArmed(null);
-              setConfigOpen(true);
-              refreshPorts();
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96c-.5-.38-1.04-.7-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 13.94a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.24.1.51 0 .64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2Z"
-              />
-            </svg>
-          </HwButton>
-          <StatusLed status={status} />
+    <div className="chassis">
+      <header className="chrome band">
+        <h1 className="silk m-0">Surge Chord</h1>
+        <div className="min-w-0 flex-1">
+          <PatchBar
+            currentPath={status?.current_preset_path ?? null}
+            currentLabel={status?.current_preset ?? null}
+            supported={!!status?.presets_supported}
+          />
         </div>
+        {status?.editor_open && (
+          <Silk>
+            MIDI {status.midi_sink === "surge" ? "→ Surge" : "→ Chord"}
+          </Silk>
+        )}
+        <HwButton
+          className="hw-btn-icon"
+          aria-label="Config"
+          onClick={() => {
+            setHeld(new Set());
+            setArmed(null);
+            setConfigOpen(true);
+            refreshPorts();
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96c-.5-.38-1.04-.7-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 13.94a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.24.1.51 0 .64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2Z"
+            />
+          </svg>
+        </HwButton>
       </header>
 
       {missing && (
-        <div className="mb-3 border border-[var(--danger)] bg-[#1c1210] px-3 py-2 text-sm">
+        <div className="band border-[var(--danger)] bg-[#1c1210] px-0 py-2 text-sm">
           <p className="font-medium text-[var(--danger-ink)]">Surge XT CLAP not loaded</p>
           <p className="mt-1 text-[var(--muted)]">{status?.surge.error}</p>
           <p className="mt-1 text-xs text-[var(--muted)]">
@@ -600,158 +608,106 @@ export default function Home() {
         </div>
       )}
 
-      <PatchBar
-        currentPath={status?.current_preset_path ?? null}
-        currentLabel={status?.current_preset ?? null}
-        supported={!!status?.presets_supported}
-      />
-
-      <hr className="hw-rule my-3" />
-
-      <section className="mb-3 flex flex-wrap items-start gap-x-8 gap-y-3">
-        <div className="flex min-w-0 flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-            <HwToggleGroup
-              label="Key"
-              value={String(root)}
-              options={ROOTS.map((n, i) => [String(i), n] as const)}
-              disabledIds={piano ? ROOTS.map((_, i) => String(i)) : []}
-              onChange={(v) => setRoot(Number(v))}
-            />
-            <HwToggleGroup
-              label="Scale"
-              value={scale}
-              options={[
-                ["major", "Maj"],
-                ["minor", "Min"],
-              ]}
-              disabledIds={piano ? ["major", "minor"] : []}
-              onChange={(v) => setScale(v as "major" | "minor")}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-            <div className="hw-row">
-              <Silk>Oct</Silk>
-              <div className="hw-cluster">
-                <HwButton
-                  disabled={octave <= 1}
-                  onClick={() => bumpOctave(Math.max(1, octave - 1))}
-                >
-                  −
-                </HwButton>
-                <HwButton className="min-w-8">{octave}</HwButton>
-                <HwButton
-                  disabled={octave >= 7}
-                  onClick={() => bumpOctave(Math.min(7, octave + 1))}
-                >
-                  +
-                </HwButton>
-              </div>
-            </div>
-            <HwToggleGroup
-              label="Type"
-              value={chordType}
-              options={CHORD_TYPES}
-              onChange={(v) => {
-                const next = v as ChordType;
-                setChordType(next);
-                if (next === "1") {
-                  setInversion(0);
-                  setSecondary("none");
-                  setStrumMode(false);
-                } else {
-                  setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
-                }
-              }}
-            />
-            <HwToggleGroup
-              label="Inv"
-              value={String(inversion)}
-              options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
-              disabledIds={
-                piano
-                  ? INVERSIONS.map(([id]) => String(id))
-                  : chordType === "tri"
-                    ? ["3"]
-                    : []
-              }
-              onChange={(v) => setInversion(Number(v))}
-            />
-            <HwToggleGroup
-              label="Sec"
-              value={secondary}
-              options={SECONDARIES}
-              disabledIds={piano ? SECONDARIES.map(([id]) => id) : []}
-              onChange={(v) => setSecondary(v as Secondary)}
-            />
+      <section className="band toolbar" aria-labelledby="harmony-heading">
+        <h2 className="sr-only" id="harmony-heading">
+          Harmony
+        </h2>
+        <HwToggleGroup
+          label="Key"
+          value={String(root)}
+          options={ROOTS.map((n, i) => [String(i), n] as const)}
+          disabledIds={piano ? ROOTS.map((_, i) => String(i)) : []}
+          onChange={(v) => setRoot(Number(v))}
+        />
+        <HwToggleGroup
+          label="Scale"
+          value={scale}
+          options={[
+            ["major", "Maj"],
+            ["minor", "Min"],
+          ]}
+          disabledIds={piano ? ["major", "minor"] : []}
+          onChange={(v) => setScale(v as "major" | "minor")}
+        />
+        <div className="hw-row">
+          <Silk>Oct</Silk>
+          <div className="hw-cluster">
+            <HwButton
+              disabled={octave <= 1}
+              aria-label="Octave down"
+              onClick={() => bumpOctave(Math.max(1, octave - 1))}
+            >
+              −
+            </HwButton>
+            <span className="octave-readout" aria-live="polite" aria-label={`Octave ${octave}`}>
+              {octave}
+            </span>
+            <HwButton
+              disabled={octave >= 7}
+              aria-label="Octave up"
+              onClick={() => bumpOctave(Math.min(7, octave + 1))}
+            >
+              +
+            </HwButton>
           </div>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2">
-          <Silk>Metronome{metro.midi_sync ? " · sync" : ""}</Silk>
-          <HwToggle
-            on={metro.enabled}
-            onClick={() => pushMetro({ ...metro, enabled: !metro.enabled })}
-          >
-            On
-          </HwToggle>
-            <HwMenu
-              className="hw-menu-compact"
-              label="Meter"
-            value={`${metro.numerator}/${metro.denominator}`}
-            options={METERS}
-            onChange={(v) => {
-              const [n, d] = v.split("/").map(Number);
-              pushMetro({
-                ...metro,
-                numerator: n || 4,
-                denominator: d || 4,
-              });
-            }}
-          />
-            <HwMenu
-              className="hw-menu-compact"
-              label="Grid"
-            value={String(metro.subdivision)}
-            options={GRIDS}
-            onChange={(v) => pushMetro({ ...metro, subdivision: Number(v) })}
-          />
-          <HwDragValue
-            label="BPM"
-            display={`${Math.round(metro.bpm)}${metro.midi_sync ? " sync" : ""}`}
-            value={metro.bpm}
-            min={40}
-            max={240}
-            step={1}
-            disabled={metro.midi_sync}
-            onChange={(v) => pushMetro({ ...metro, bpm: v })}
-            onGestureChange={(on) => {
-              metroBpmGesture.current = on;
-            }}
-          />
-          <HwDragValue
-            label="Level"
-            display={`${Math.round(metro.volume * 100)}`}
-            value={Math.round(metro.volume * 100)}
-            min={0}
-            max={100}
-            step={1}
-            onChange={(v) => pushMetro({ ...metro, volume: v / 100 })}
-            onGestureChange={(on) => {
-              metroVolGesture.current = on;
-            }}
-          />
-        </div>
+        <HwToggleGroup
+          label="Type"
+          value={chordType}
+          options={CHORD_TYPES}
+          onChange={(v) => {
+            const next = v as ChordType;
+            setChordType(next);
+            if (next === "1") {
+              setInversion(0);
+              setSecondary("none");
+              setStrumMode(false);
+            } else {
+              setInversion((inv) => Math.min(inv, TONE_COUNT[next] - 1));
+            }
+          }}
+        />
+        <HwToggleGroup
+          label="Inv"
+          value={String(inversion)}
+          options={INVERSIONS.map(([id, name]) => [String(id), name] as const)}
+          disabledIds={
+            piano
+              ? INVERSIONS.map(([id]) => String(id))
+              : chordType === "tri"
+                ? ["3"]
+                : []
+          }
+          onChange={(v) => setInversion(Number(v))}
+        />
+        <HwToggleGroup
+          label="Sec"
+          value={secondary}
+          options={SECONDARIES}
+          disabledIds={piano ? SECONDARIES.map(([id]) => id) : []}
+          onChange={(v) => setSecondary(v as Secondary)}
+        />
+        {piano ? <Silk title="Keys play as written. Key, Scale, Inv, and Sec are off.">Type 1</Silk> : null}
       </section>
 
-      <section className="mb-4 grid gap-2 lg:grid-cols-[55fr_45fr] lg:items-stretch">
-        <div className="grid grid-cols-7 gap-1.5">
+      <section className="band" aria-labelledby="pads-heading">
+        <div className="mb-1 flex items-baseline justify-between gap-2">
+          <h2 className="sr-only" id="pads-heading">
+            Pads
+          </h2>
+          <Silk>1–7 · Space</Silk>
+        </div>
+        <div className="grid grid-cols-7 gap-1">
           {DEGREES.map((d) => {
             const on = held.has(d.n);
+            const symbol = chordSymbol(root, scale, chordType, secondary, d.n);
             return (
               <button
                 key={d.n}
                 type="button"
                 className="hw-pad"
+                aria-pressed={on}
+                aria-label={`Pad ${d.n}, ${symbol}. Keyboard ${d.n}.`}
                 data-on={on ? "true" : undefined}
                 data-armed={armed === d.n ? "true" : undefined}
                 onPointerDown={(e) => {
@@ -764,329 +720,416 @@ export default function Home() {
                 <span className="silk opacity-70">
                   {d.n}/{padRoman(d.n, scale, secondary)}
                 </span>
-                <span className="text-lg font-semibold leading-tight">
-                  {chordSymbol(root, scale, chordType, secondary, d.n)}
-                </span>
+                <span className="text-sm font-semibold leading-tight">{symbol}</span>
               </button>
             );
           })}
         </div>
-        <EnvelopePanel
-          params={env}
-          onChange={setEnv}
-          midi={midiFor}
-          onGestureChange={(on) => {
-            envGesture.current = on;
-          }}
-        />
       </section>
 
-      <section className="mb-4 grid items-center gap-x-4 gap-y-2 lg:grid-cols-[minmax(0,1fr)_16rem]">
-        <Silk className="max-lg:order-1">Keyboard</Silk>
-        <div className="flex items-center justify-between gap-2 max-lg:order-3">
+      <section className="band" aria-labelledby="sound-heading">
+        <h2 className="sr-only" id="sound-heading">
+          Sound
+        </h2>
+        <div className="sound-row">
+          <EnvelopePanel
+            params={env}
+            onChange={setEnv}
+            midi={midiFor}
+            onGestureChange={(on) => {
+              envGesture.current = on;
+            }}
+          />
+          <div className="sound-filter">
+            <div className="filter-head">
+              <h3 className="env-title">Filter</h3>
+              <HwToggleGroup
+                ariaLabel="Filter type"
+                value={filterType}
+                options={[
+                  ["lp", "LP"],
+                  ["hp", "HP"],
+                  ["bp", "BP"],
+                  ["notch", "Notch"],
+                ]}
+                onChange={(v) => {
+                  const mode = v as FilterType;
+                  setFilterType(mode);
+                  invoke("set_filter_type", { mode }).catch(() => undefined);
+                }}
+              />
+              <FilterGraph type={filterType} cutoff={filter} res={filterRes} />
+            </div>
+            <div className="hw-knobs env-knobs filter-knobs">
+              <HwKnob
+                label="Cut"
+                display={`${Math.round(filter * 100)}`}
+                value={filter}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => {
+                  setFilter(v);
+                  invoke("set_filter", { value: v }).catch(() => undefined);
+                }}
+                onGestureChange={(on) => {
+                  filterGesture.current = on;
+                }}
+                midi={midiFor("filter")}
+              />
+              <HwKnob
+                label="Res"
+                display={`${Math.round(filterRes * 100)}`}
+                value={filterRes}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => {
+                  setFilterRes(v);
+                  invoke("set_filter_res", { value: v }).catch(() => undefined);
+                }}
+                onGestureChange={(on) => {
+                  filterResGesture.current = on;
+                }}
+                midi={midiFor("filter_res")}
+              />
+              <HwKnob
+                label="Roll"
+                display={`${Math.round(rollMs)} ms`}
+                value={rollMs}
+                min={0}
+                max={500}
+                step={1}
+                disabled={
+                  piano ||
+                  (held.size === 0 ? TONE_COUNT[chordType] : heldNotes.length) <= 1
+                }
+                onChange={(v) => {
+                  setRollMs(v);
+                  invoke("set_roll", { ms: v }).catch(() => undefined);
+                }}
+                onGestureChange={(on) => {
+                  rollGesture.current = on;
+                }}
+                midi={midiFor("roll")}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="band" aria-labelledby="play-heading">
+        <div className="toolbar mb-1">
+          <h2 className="sr-only" id="play-heading">
+            Play
+          </h2>
           <Silk>Strum</Silk>
           <HwToggle
             on={strumMode}
             disabled={piano}
+            title={
+              piano
+                ? "Strum is off in Type 1."
+                : strumMode
+                  ? "Arm a pad, then strum left or right."
+                  : undefined
+            }
             onClick={() => setStrumMode((v) => !v)}
           >
             On
           </HwToggle>
         </div>
-        <div className="max-lg:order-2">
-          <PianoPreview notes={previewNotes} octave={octave} playable={piano} />
-        </div>
-        <div className="max-lg:order-4">
+        <div className="play-row">
+          <PianoPreview notes={previewNotes} octave={octave} playable={piano} compact={!piano} />
           <StrumPlate
             notes={heldNotes}
-            sounding={previewNotes}
+            sounding={strumMode ? (engineNotes ?? []) : previewNotes}
             armed={held.size > 0}
-            enabled={strumMode}
+            enabled={strumMode && !piano}
           />
         </div>
       </section>
 
-      <div className="grid items-start gap-x-8 gap-y-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <section>
-        <Silk className="mb-2">Arp</Silk>
-        <div className="hw-inline">
-        <div className="flex flex-wrap items-center gap-3">
-          <HwToggle on={arpOn} onClick={() => setArpOn((v) => !v)}>
-            On
-          </HwToggle>
-          <HwToggle on={arpLatch} onClick={() => setArpLatch((v) => !v)}>
-            Latch
-          </HwToggle>
-          <HwToggleGroup
-            value={arpMode}
-            options={[
-              ["up", "Up"],
-              ["down", "Dn"],
-              ["up-down", "U/D"],
-            ]}
-            onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
-          />
-          <HwMenu
-            className="hw-menu-compact"
-            label="Type"
-            value={filterType}
-            options={[
-              ["lp", "Lowpass"],
-              ["hp", "Highpass"],
-              ["bp", "Bandpass"],
-              ["notch", "Notch"],
-            ]}
-            onChange={(v) => {
-              const mode = v as FilterType;
-              setFilterType(mode);
-              invoke("set_filter_type", { mode }).catch(() => undefined);
-            }}
-          />
+      <section className="band" aria-labelledby="time-heading">
+        <div className="mb-1 flex items-baseline justify-between gap-2">
+          <h2 className="zone-title" id="time-heading">
+            Time
+          </h2>
+          <Silk>
+            {metro.midi_sync || status?.midi_clock || looper.clock_sync ? "MIDI clock sync" : "Internal clock"}
+            {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
+          </Silk>
         </div>
-        <div className="hw-knobs">
-          <HwKnob
-            label="Rate"
-            display={`${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
-            value={arpRate}
-            min={1}
-            max={16}
-            step={0.5}
-            onChange={setArpRate}
-            onGestureChange={(on) => {
-              rateGesture.current = on;
-            }}
-            midi={midiFor("arp_rate")}
-          />
-          <HwKnob
-            label="Filter"
-            display={`${Math.round(filter * 100)}`}
-            value={filter}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => {
-              setFilter(v);
-              invoke("set_filter", { value: v }).catch(() => undefined);
-            }}
-            onGestureChange={(on) => {
-              filterGesture.current = on;
-            }}
-            midi={midiFor("filter")}
-          />
-          <HwKnob
-            label="Res"
-            display={`${Math.round(filterRes * 100)}`}
-            value={filterRes}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => {
-              setFilterRes(v);
-              invoke("set_filter_res", { value: v }).catch(() => undefined);
-            }}
-            onGestureChange={(on) => {
-              filterResGesture.current = on;
-            }}
-            midi={midiFor("filter_res")}
-          />
-          <HwKnob
-            label="Roll"
-            display={`${Math.round(rollMs)} ms`}
-            value={rollMs}
-            min={0}
-            max={500}
-            step={1}
-            disabled={
-              piano ||
-              (held.size === 0 ? TONE_COUNT[chordType] : heldNotes.length) <= 1
-            }
-            onChange={(v) => {
-              setRollMs(v);
-              invoke("set_roll", { ms: v }).catch(() => undefined);
-            }}
-            onGestureChange={(on) => {
-              rollGesture.current = on;
-            }}
-            midi={midiFor("roll")}
-          />
-        </div>
-        </div>
-      </section>
+        <div className="transport">
+          <div className="transport-cluster">
+            <Silk>Metro{metro.midi_sync ? " · sync" : ""}</Silk>
+            <HwToggle
+              on={metro.enabled}
+              onClick={() => pushMetro({ ...metro, enabled: !metro.enabled })}
+            >
+              On
+            </HwToggle>
+            <HwFlyout
+              className="hw-menu-compact"
+              summary={`${Math.round(metro.bpm)} · ${metro.numerator}/${metro.denominator}`}
+            >
+              <HwMenu
+                className="hw-menu-compact"
+                label="Meter"
+                value={`${metro.numerator}/${metro.denominator}`}
+                options={METERS}
+                onChange={(v) => {
+                  const [n, d] = v.split("/").map(Number);
+                  pushMetro({
+                    ...metro,
+                    numerator: n || 4,
+                    denominator: d || 4,
+                  });
+                }}
+              />
+              <HwMenu
+                className="hw-menu-compact"
+                label="Grid"
+                value={String(metro.subdivision)}
+                options={GRIDS}
+                onChange={(v) => pushMetro({ ...metro, subdivision: Number(v) })}
+              />
+              <HwDragValue
+                label="BPM"
+                display={`${Math.round(metro.bpm)}${metro.midi_sync ? " sync" : ""}`}
+                value={metro.bpm}
+                min={40}
+                max={240}
+                step={1}
+                disabled={metro.midi_sync}
+                onChange={(v) => pushMetro({ ...metro, bpm: v })}
+                onGestureChange={(on) => {
+                  metroBpmGesture.current = on;
+                }}
+              />
+              <HwDragValue
+                label="Level"
+                display={`${Math.round(metro.volume * 100)}`}
+                value={Math.round(metro.volume * 100)}
+                min={0}
+                max={100}
+                step={1}
+                onChange={(v) => pushMetro({ ...metro, volume: v / 100 })}
+                onGestureChange={(on) => {
+                  metroVolGesture.current = on;
+                }}
+              />
+            </HwFlyout>
+          </div>
 
-      <section>
-        <Silk className="mb-2">
-          Loop{looper.clock_sync ? " · sync" : ""}
-          {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
-        </Silk>
-        <div className="hw-inline">
-        <div>
-        <div className="flex flex-wrap items-center gap-3">
-          <HwToggleGroup
-            label="Track"
-            value={String(looper.selected)}
-            options={[
-              ["0", "1"],
-              ["1", "2"],
-            ]}
-            onChange={(v) => {
-              const track = Number(v);
-              setLooper((prev) => ({ ...prev, selected: track }));
-              invoke("looper_select", { track }).catch(() => undefined);
-            }}
-          />
-          <HwToggle
-            on={!!looper.count_in}
-            onClick={() => {
-              const on = !looper.count_in;
-              setLooper((prev) => ({ ...prev, count_in: on }));
-              invoke("looper_count_in", { on }).catch(() => undefined);
-            }}
-          >
-            Count
-          </HwToggle>
-          <HwStomp
-            mode={looper.counting ? "rec" : loopRecMode(looper.modes[looper.selected] ?? 0)}
-            on={
-              looper.counting ||
-              looper.modes[looper.selected] === 1 ||
-              looper.modes[looper.selected] === 3
-            }
-            onClick={() => invoke("looper_rec").catch(() => undefined)}
-            midi={midiFor("looper_rec")}
-          >
-            Rec
-          </HwStomp>
-          <HwStomp
-            mode={looper.modes[looper.selected] === 2 ? "play" : undefined}
-            on={looper.modes[looper.selected] === 2}
-            disabled={(looper.modes[looper.selected] ?? 0) === 0}
-            onClick={() => invoke("looper_play").catch(() => undefined)}
-            midi={midiFor("looper_play")}
-          >
-            Play
-          </HwStomp>
-          <HwStomp
-            onClick={() => invoke("looper_stop").catch(() => undefined)}
-            midi={midiFor("looper_stop")}
-          >
-            Stop
-          </HwStomp>
-          <HwStomp
-            onClick={() => invoke("looper_undo").catch(() => undefined)}
-            midi={midiFor("looper_undo")}
-          >
-            Undo
-          </HwStomp>
-          <HwButton
-            disabled={(looper.modes[looper.selected] ?? 0) !== 4 && (looper.modes[looper.selected] ?? 0) !== 0}
-            onClick={() => invoke("looper_clear").catch(() => undefined)}
-          >
-            Clear
-          </HwButton>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <HwToggle
-            on={looper.muted[0]}
-            onClick={() => {
-              const on = !looper.muted[0];
-              setLooper((prev) => ({ ...prev, muted: [on, prev.muted[1]] }));
-              invoke("looper_mute", { track: 0, on }).catch(() => undefined);
-            }}
-          >
-            Mute 1
-          </HwToggle>
-          <HwToggle
-            on={looper.muted[1]}
-            onClick={() => {
-              const on = !looper.muted[1];
-              setLooper((prev) => ({ ...prev, muted: [prev.muted[0], on] }));
-              invoke("looper_mute", { track: 1, on }).catch(() => undefined);
-            }}
-          >
-            Mute 2
-          </HwToggle>
-          <HwStomp
-            on={looper.muted[looper.selected] ?? false}
-            onClick={() => {
-              const track = looper.selected;
-              const on = !looper.muted[track];
-              setLooper((prev) => {
-                const muted: [boolean, boolean] = [...prev.muted];
-                muted[track] = on;
-                return { ...prev, muted };
-              });
-              invoke("looper_mute", { track, on }).catch(() => undefined);
-            }}
-            midi={midiFor("looper_mute")}
-          >
-            Mute
-          </HwStomp>
-          <HwToggleGroup
-            label="T2"
-            value={String(looper.mult)}
-            options={[
-              ["1", "1×"],
-              ["2", "2×"],
-              ["4", "4×"],
-            ]}
-            disabledIds={[
-              ...(looper.max_mult < 2 ? ["2"] : []),
-              ...(looper.max_mult < 4 ? ["4"] : []),
-            ]}
-            onChange={(v) => {
-              const mult = Number(v);
-              setLooper((prev) => ({ ...prev, mult }));
-              invoke("looper_mult", { mult }).catch(() => undefined);
-            }}
-          />
-        </div>
-        </div>
-        <div className="hw-knobs">
-          <HwKnob
-            label="Lvl 1"
-            display={`${Math.round((looper.levels[0] ?? 1) * 100)}`}
-            value={looper.levels[0] ?? 1}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => {
-              setLooper((prev) => ({ ...prev, levels: [v, prev.levels[1] ?? 1] }));
-              invoke("looper_level", { track: 0, value: v }).catch(() => undefined);
-            }}
-            onGestureChange={(on) => {
-              levelGesture.current = on ? 0 : null;
-            }}
-            midi={midiFor("looper_level_1")}
-          />
-          <HwKnob
-            label="Lvl 2"
-            display={`${Math.round((looper.levels[1] ?? 1) * 100)}`}
-            value={looper.levels[1] ?? 1}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(v) => {
-              setLooper((prev) => ({ ...prev, levels: [prev.levels[0] ?? 1, v] }));
-              invoke("looper_level", { track: 1, value: v }).catch(() => undefined);
-            }}
-            onGestureChange={(on) => {
-              levelGesture.current = on ? 1 : null;
-            }}
-            midi={midiFor("looper_level_2")}
-          />
-        </div>
-        </div>
-        <div
-          className="loop-playhead"
-          data-rec={looper.modes[looper.selected] === 1 ? "true" : undefined}
-          data-pending={looper.pending || looper.counting ? "true" : undefined}
-          style={{ "--pos": String(looper.playhead) } as CSSProperties}
-          aria-label="Loop playhead"
-        >
-          <i />
+          <div className="transport-cluster">
+            <Silk>Arp</Silk>
+            <HwToggle on={arpOn} onClick={() => setArpOn((v) => !v)}>
+              On
+            </HwToggle>
+            <HwToggle on={arpLatch} onClick={() => setArpLatch((v) => !v)}>
+              Latch
+            </HwToggle>
+            <HwFlyout
+              className="hw-menu-compact"
+              summary={`${arpMode === "up-down" ? "U/D" : arpMode === "down" ? "Dn" : "Up"} · ${arpRate.toFixed(1)} Hz`}
+            >
+              <HwToggleGroup
+                ariaLabel="Arp direction"
+                value={arpMode}
+                options={[
+                  ["up", "Up"],
+                  ["down", "Dn"],
+                  ["up-down", "U/D"],
+                ]}
+                onChange={(v) => setArpMode(v as "up" | "down" | "up-down")}
+              />
+              <HwDragValue
+                label="Rate"
+                display={`${arpRate.toFixed(1)} Hz${status?.midi_clock ? " sync" : ""}`}
+                value={arpRate}
+                min={1}
+                max={16}
+                step={0.5}
+                onChange={setArpRate}
+                onGestureChange={(on) => {
+                  rateGesture.current = on;
+                }}
+                midi={midiFor("arp_rate")}
+              />
+            </HwFlyout>
+          </div>
+
+          <div className="transport-cluster transport-cluster-loop">
+            <Silk>
+              Loop{looper.clock_sync ? " · sync" : ""}
+              {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
+            </Silk>
+            <HwToggleGroup
+              label="Track"
+              value={String(looper.selected)}
+              options={[
+                ["0", "1"],
+                ["1", "2"],
+              ]}
+              onChange={(v) => {
+                const track = Number(v);
+                setLooper((prev) => ({ ...prev, selected: track }));
+                invoke("looper_select", { track }).catch(() => undefined);
+              }}
+            />
+            <HwStomp
+              mode={looper.counting ? "rec" : loopRecMode(looper.modes[looper.selected] ?? 0)}
+              on={
+                looper.counting ||
+                looper.modes[looper.selected] === 1 ||
+                looper.modes[looper.selected] === 3
+              }
+              onClick={() => invoke("looper_rec").catch(() => undefined)}
+              midi={midiFor("looper_rec")}
+            >
+              Rec
+            </HwStomp>
+            <HwStomp
+              mode={looper.modes[looper.selected] === 2 ? "play" : undefined}
+              on={looper.modes[looper.selected] === 2}
+              disabled={(looper.modes[looper.selected] ?? 0) === 0}
+              onClick={() => invoke("looper_play").catch(() => undefined)}
+              midi={midiFor("looper_play")}
+            >
+              Play
+            </HwStomp>
+            <HwStomp
+              onClick={() => invoke("looper_stop").catch(() => undefined)}
+              midi={midiFor("looper_stop")}
+            >
+              Stop
+            </HwStomp>
+            <HwFlyout className="hw-menu-compact" summary="More">
+              <HwToggle
+                on={!!looper.count_in}
+                onClick={() => {
+                  const on = !looper.count_in;
+                  setLooper((prev) => ({ ...prev, count_in: on }));
+                  invoke("looper_count_in", { on }).catch(() => undefined);
+                }}
+              >
+                Count
+              </HwToggle>
+              <HwStomp
+                onClick={() => invoke("looper_undo").catch(() => undefined)}
+                midi={midiFor("looper_undo")}
+              >
+                Undo
+              </HwStomp>
+              <HwButton
+                disabled={
+                  (looper.modes[looper.selected] ?? 0) !== 4 &&
+                  (looper.modes[looper.selected] ?? 0) !== 0
+                }
+                onClick={() => invoke("looper_clear").catch(() => undefined)}
+              >
+                Clear
+              </HwButton>
+              <HwToggle
+                on={looper.muted[0]}
+                onClick={() => {
+                  const on = !looper.muted[0];
+                  setLooper((prev) => ({ ...prev, muted: [on, prev.muted[1]] }));
+                  invoke("looper_mute", { track: 0, on }).catch(() => undefined);
+                }}
+              >
+                Mute 1
+              </HwToggle>
+              <HwToggle
+                on={looper.muted[1]}
+                onClick={() => {
+                  const on = !looper.muted[1];
+                  setLooper((prev) => ({ ...prev, muted: [prev.muted[0], on] }));
+                  invoke("looper_mute", { track: 1, on }).catch(() => undefined);
+                }}
+              >
+                Mute 2
+              </HwToggle>
+              <HwStomp
+                on={looper.muted[looper.selected] ?? false}
+                onClick={() => {
+                  const track = looper.selected;
+                  const on = !looper.muted[track];
+                  setLooper((prev) => {
+                    const muted: [boolean, boolean] = [...prev.muted];
+                    muted[track] = on;
+                    return { ...prev, muted };
+                  });
+                  invoke("looper_mute", { track, on }).catch(() => undefined);
+                }}
+                midi={midiFor("looper_mute")}
+              >
+                Mute
+              </HwStomp>
+              <HwToggleGroup
+                label="T2"
+                value={String(looper.mult)}
+                options={[
+                  ["1", "1×"],
+                  ["2", "2×"],
+                  ["4", "4×"],
+                ]}
+                disabledIds={[
+                  ...(looper.max_mult < 2 ? ["2"] : []),
+                  ...(looper.max_mult < 4 ? ["4"] : []),
+                ]}
+                onChange={(v) => {
+                  const mult = Number(v);
+                  setLooper((prev) => ({ ...prev, mult }));
+                  invoke("looper_mult", { mult }).catch(() => undefined);
+                }}
+              />
+              <HwDragValue
+                label="Lvl 1"
+                display={`${Math.round((looper.levels[0] ?? 1) * 100)}`}
+                value={looper.levels[0] ?? 1}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => {
+                  setLooper((prev) => ({ ...prev, levels: [v, prev.levels[1] ?? 1] }));
+                  invoke("looper_level", { track: 0, value: v }).catch(() => undefined);
+                }}
+                onGestureChange={(on) => {
+                  levelGesture.current = on ? 0 : null;
+                }}
+                midi={midiFor("looper_level_1")}
+              />
+              <HwDragValue
+                label="Lvl 2"
+                display={`${Math.round((looper.levels[1] ?? 1) * 100)}`}
+                value={looper.levels[1] ?? 1}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => {
+                  setLooper((prev) => ({ ...prev, levels: [prev.levels[0] ?? 1, v] }));
+                  invoke("looper_level", { track: 1, value: v }).catch(() => undefined);
+                }}
+                onGestureChange={(on) => {
+                  levelGesture.current = on ? 1 : null;
+                }}
+                midi={midiFor("looper_level_2")}
+              />
+            </HwFlyout>
+            <div
+              className="loop-playhead"
+              data-rec={looper.modes[looper.selected] === 1 ? "true" : undefined}
+              data-pending={looper.pending || looper.counting ? "true" : undefined}
+              style={{ "--pos": String(looper.playhead) } as CSSProperties}
+              aria-label="Loop playhead"
+            >
+              <i />
+            </div>
+          </div>
         </div>
       </section>
-      </div>
 
       {configOpen && (
         <ConfigModal
@@ -1297,18 +1340,28 @@ function PatchBar({
   return (
     <div className="relative" ref={rootRef}>
       <div className="flex items-stretch gap-1">
-        <HwButton disabled={disabled || !filtered.length} onClick={() => step(-1)}>
+        <HwButton
+          disabled={disabled || !filtered.length}
+          aria-label="Previous patch"
+          onClick={() => step(-1)}
+        >
           ◀
         </HwButton>
         <HwButton
           className="hw-btn-wide"
           on={open}
           disabled={!presets.length && !open}
+          aria-label="Patch browser"
+          aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
         >
           {barLabel}
         </HwButton>
-        <HwButton disabled={disabled || !filtered.length} onClick={() => step(1)}>
+        <HwButton
+          disabled={disabled || !filtered.length}
+          aria-label="Next patch"
+          onClick={() => step(1)}
+        >
           ▶
         </HwButton>
       </div>
@@ -1466,9 +1519,17 @@ function ConfigModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
-      <div className="hw-dialog flex flex-col gap-4" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="hw-dialog flex flex-col gap-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="config-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between gap-3">
-          <Silk>Config</Silk>
+          <h2 className="zone-title" id="config-title">
+            Config
+          </h2>
           <HwButton onClick={onClose}>Close</HwButton>
         </div>
         <div>
@@ -1534,6 +1595,114 @@ function ConfigModal({
   );
 }
 
+const FILTER_GRAPH_W = 640;
+const FILTER_GRAPH_H = 168;
+const FILTER_FMIN = 20;
+const FILTER_FMAX = 20000;
+
+function cutoffHz(norm: number) {
+  return 70 * (18000 / 70) ** Math.min(1, Math.max(0, norm));
+}
+
+function formatHz(hz: number) {
+  if (hz >= 10000) return `${(hz / 1000).toFixed(0)} kHz`;
+  if (hz >= 1000) return `${(hz / 1000).toFixed(1)} kHz`;
+  return `${Math.round(hz)} Hz`;
+}
+
+function logFreqX(f: number, padL: number, innerW: number) {
+  const t =
+    Math.log(Math.min(FILTER_FMAX, Math.max(FILTER_FMIN, f)) / FILTER_FMIN) /
+    Math.log(FILTER_FMAX / FILTER_FMIN);
+  return padL + t * innerW;
+}
+
+function svfGain(type: FilterType, cutoff: number, res: number, f: number) {
+  if (type === "lp" && cutoff >= 0.995) return 1;
+  const fc = cutoffHz(cutoff);
+  const q = Math.SQRT1_2 + res * (10 - Math.SQRT1_2);
+  const w = f / Math.max(1, fc);
+  const w2 = w * w;
+  const denom = Math.hypot(1 - w2, w / q);
+  if (type === "hp") return w2 / denom;
+  if (type === "bp") return w / q / denom;
+  if (type === "notch") return Math.abs(1 - w2) / denom;
+  return 1 / denom;
+}
+
+function FilterGraph({
+  type,
+  cutoff,
+  res,
+}: {
+  type: FilterType;
+  cutoff: number;
+  res: number;
+}) {
+  const padL = 10;
+  const padR = 10;
+  const padT = 14;
+  const padB = 22;
+  const innerW = FILTER_GRAPH_W - padL - padR;
+  const innerH = FILTER_GRAPH_H - padT - padB;
+  const path = useMemo(() => {
+    const n = 120;
+    const mags = Array.from({ length: n }, (_, i) => {
+      const t = i / (n - 1);
+      const f = FILTER_FMIN * (FILTER_FMAX / FILTER_FMIN) ** t;
+      return svfGain(type, cutoff, res, f);
+    });
+    const peak = Math.max(1.15, ...mags);
+    const line = mags.map((m, i) => {
+      const x = padL + (i / (n - 1)) * innerW;
+      const y = padT + (1 - Math.min(1, m / peak)) * innerH;
+      return `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+    });
+    const stroke = line.join(" ");
+    return {
+      stroke,
+      fill: `${stroke} L${padL + innerW} ${padT + innerH} L${padL} ${padT + innerH} Z`,
+    };
+  }, [type, cutoff, res, innerH, innerW, padL, padT]);
+  const fc = cutoffHz(cutoff);
+  const fcX = logFreqX(fc, padL, innerW);
+  const ticks: ReadonlyArray<readonly [number, string]> = [
+    [100, "100"],
+    [1000, "1k"],
+    [10000, "10k"],
+  ];
+  return (
+    <svg
+      className="filter-graph"
+      viewBox={`0 0 ${FILTER_GRAPH_W} ${FILTER_GRAPH_H}`}
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      {ticks.map(([f]) => (
+        <line
+          key={f}
+          className="env-grid"
+          x1={logFreqX(f, padL, innerW)}
+          x2={logFreqX(f, padL, innerW)}
+          y1={padT}
+          y2={padT + innerH}
+        />
+      ))}
+      <path className="env-fill" d={path.fill} />
+      <path className="env-stroke" d={path.stroke} />
+      <line className="env-playhead-line" x1={fcX} x2={fcX} y1={padT} y2={padT + innerH} />
+      {ticks.map(([f, label]) => (
+        <text key={label} className="env-tick" x={logFreqX(f, padL, innerW)} y={FILTER_GRAPH_H - 6}>
+          {label}
+        </text>
+      ))}
+      <text className="filter-fc env-tick" x={Math.min(FILTER_GRAPH_W - 36, Math.max(padL, fcX))} y={11}>
+        {formatHz(fc)}
+      </text>
+    </svg>
+  );
+}
+
 function isBlackPc(pc: number) {
   return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10;
 }
@@ -1556,10 +1725,12 @@ function PianoPreview({
   notes,
   octave,
   playable = false,
+  compact = false,
 }: {
   notes: number[];
   octave: number;
   playable?: boolean;
+  compact?: boolean;
 }) {
   const [local, setLocal] = useState<number[]>([]);
   const pointers = useRef(new Map<number, number>());
@@ -1611,18 +1782,22 @@ function PianoPreview({
     }
   }
   const n = Math.max(1, whites.length);
-  const keyClass = playable ? "cursor-pointer touch-none" : "";
   return (
-    <div className="relative h-40 select-none">
+    <div className="piano-preview" data-compact={compact ? "true" : undefined}>
       <div className="flex h-full overflow-hidden rounded-[var(--r)] border border-[var(--line)] bg-[#101010]">
         {whites.map((m) => {
           const on = pressed.has(m);
           return (
             <div
               key={m}
-              className={`relative min-w-0 flex-1 border-r border-black/20 last:border-r-0 ${keyClass} ${
+              role={playable ? "button" : undefined}
+              tabIndex={playable ? 0 : -1}
+              aria-pressed={playable ? on : undefined}
+              aria-label={playable ? `${NOTE_NAMES[m % 12]}${Math.floor(m / 12) - 1}` : undefined}
+              className={`piano-key relative min-w-0 flex-1 border-r border-black/20 last:border-r-0 ${
                 on ? "bg-[var(--ivory-press)]" : "bg-[var(--ivory)]"
               }`}
+              data-playable={playable ? "true" : undefined}
               onPointerDown={(e) => {
                 e.preventDefault();
                 pressKey(m, e.pointerId, e.currentTarget);
@@ -1654,9 +1829,14 @@ function PianoPreview({
         return (
           <div
             key={midi}
-            className={`absolute top-0 z-10 rounded-b-[2px] border border-black/50 ${keyClass} ${
+            role={playable ? "button" : undefined}
+            tabIndex={playable ? 0 : -1}
+            aria-pressed={playable ? on : undefined}
+            aria-label={playable ? `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}` : undefined}
+            className={`piano-key absolute top-0 z-10 rounded-b-[2px] border border-black/50 ${
               on ? "bg-[var(--ivory-press)]" : "bg-[#161616]"
             }`}
+            data-playable={playable ? "true" : undefined}
             style={{
               left: `${((after + 1) / n) * 100}%`,
               width: `${(100 / n) * 0.55}%`,
@@ -1673,16 +1853,6 @@ function PianoPreview({
           />
         );
       })}
-    </div>
-  );
-}
-
-function StatusLed({ status }: { status: HostStatus | null }) {
-  const ok = !!status?.surge.found && !!status.audio_ok;
-  return (
-    <div className="hw-led" data-ok={ok ? "true" : undefined}>
-      <i />
-      {ok ? "Live" : "Silent"}
     </div>
   );
 }
@@ -2054,9 +2224,11 @@ function StrumPlate({
   return (
     <div
       ref={plateRef}
-      className={`relative h-40 touch-none select-none overflow-hidden rounded-[var(--r)] border border-[var(--line)] bg-[var(--face)] ${
-        !enabled ? "opacity-45" : ""
-      }`}
+      className="strum-plate relative touch-none select-none overflow-hidden rounded-[var(--r)]"
+      data-on={enabled ? "true" : undefined}
+      data-armed={enabled && armed ? "true" : undefined}
+      role="application"
+      aria-label="Strum plate"
       style={{
         cursor: enabled ? "ew-resize" : "default",
       }}
@@ -2114,7 +2286,7 @@ function StrumPlate({
       )}
       {!enabled ? (
         <p className="pointer-events-none absolute inset-x-3 top-2 z-10 text-[11px] leading-4 text-[var(--muted)]">
-          Off — pads play chords
+          Strum off
         </p>
       ) : !armed ? (
         <p className="pointer-events-none absolute inset-x-3 top-2 z-10 text-[11px] leading-4 text-[var(--muted)]">

@@ -967,7 +967,7 @@ impl AudioEngine {
     }
 
     fn apply_strum(&mut self, time: u32, pos: u8, out: &mut Vec<GeneratedNote>) {
-        let (chord, n) = self.copy_strum_chord();
+        let (_, n) = self.copy_strum_chord();
         if n == 0 {
             self.strum_mask = 0;
             self.strum_last = Some(pos);
@@ -977,7 +977,15 @@ impl AudioEngine {
         let crossed = Self::crossed_between(last, pos, n);
         let vel = Self::strum_vel(last.abs_diff(pos));
         self.strum_last = Some(pos);
-        if crossed == 0 {
+        self.pluck_mask(time, crossed, vel, out);
+    }
+
+    fn pluck_mask(&mut self, time: u32, mask: u16, vel: u8, out: &mut Vec<GeneratedNote>) {
+        if mask == 0 {
+            return;
+        }
+        let (chord, n) = self.copy_strum_chord();
+        if n == 0 {
             return;
         }
         if self.strum_env_pending {
@@ -987,18 +995,18 @@ impl AudioEngine {
             let note_on_now = self.env.retrigger();
             let delayed = note_on_now.is_none() && self.env.awaiting_note_on();
             if delayed {
-                self.delayed_strum_mask = crossed;
+                self.delayed_strum_mask = mask;
                 self.delayed_strum_vel = vel;
                 return;
             }
         } else if self.env.awaiting_note_on() {
-            self.delayed_strum_mask |= crossed;
+            self.delayed_strum_mask |= mask;
             self.delayed_strum_vel = vel.max(self.delayed_strum_vel);
             return;
         }
         for i in 0..n {
             let bit = 1u16 << i;
-            if crossed & bit == 0 {
+            if mask & bit == 0 {
                 continue;
             }
             self.retrigger(time, chord[i], vel.max(1), out);
