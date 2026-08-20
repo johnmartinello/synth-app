@@ -1254,6 +1254,7 @@ function PatchBar({
 
   const load = (path: string) => {
     if (!path || !supported) return;
+    setOpen(false);
     setLoading(true);
     invoke("load_preset", { path })
       .catch(() => undefined)
