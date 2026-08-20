@@ -819,34 +819,29 @@ export default function Home() {
       </section>
 
       <section className="band" aria-labelledby="play-heading">
-        <div className="toolbar mb-1">
-          <h2 className="sr-only" id="play-heading">
-            Play
-          </h2>
-          <Silk>Strum</Silk>
-          <HwToggle
-            on={strumMode}
-            disabled={piano}
-            title={
-              piano
-                ? "Strum is off in Type 1."
-                : strumMode
-                  ? "Arm a pad, then strum left or right."
-                  : undefined
-            }
-            onClick={() => setStrumMode((v) => !v)}
-          >
-            On
-          </HwToggle>
-        </div>
+        <h2 className="sr-only" id="play-heading">
+          Play
+        </h2>
         <div className="play-row">
           <PianoPreview notes={previewNotes} octave={octave} playable={piano} compact={!piano} />
-          <StrumPlate
-            notes={heldNotes}
-            sounding={strumMode ? (engineNotes ?? []) : previewNotes}
-            armed={held.size > 0}
-            enabled={strumMode && !piano}
-          />
+          <div className="strum-stack">
+            <div className="strum-head">
+              <Silk>Strum</Silk>
+              <HwToggle
+                on={strumMode}
+                disabled={piano}
+                onClick={() => setStrumMode((v) => !v)}
+              >
+                On
+              </HwToggle>
+            </div>
+            <StrumPlate
+              notes={heldNotes}
+              sounding={strumMode ? (engineNotes ?? []) : previewNotes}
+              armed={held.size > 0}
+              enabled={strumMode && !piano}
+            />
+          </div>
         </div>
       </section>
 
@@ -855,14 +850,16 @@ export default function Home() {
           <h2 className="zone-title" id="time-heading">
             Time
           </h2>
-          <Silk>
-            {metro.midi_sync || status?.midi_clock || looper.clock_sync ? "MIDI clock sync" : "Internal clock"}
-            {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
-          </Silk>
+          {(metro.midi_sync || status?.midi_clock || looper.clock_sync || looper.counting || looper.pending) ? (
+            <Silk>
+              {metro.midi_sync || status?.midi_clock || looper.clock_sync ? "MIDI clock sync" : ""}
+              {looper.counting ? " · count" : looper.pending ? " · wait" : ""}
+            </Silk>
+          ) : null}
         </div>
         <div className="transport">
           <div className="transport-cluster">
-            <Silk>Metro{metro.midi_sync ? " · sync" : ""}</Silk>
+            <Silk>Metronome{metro.midi_sync ? " · sync" : ""}</Silk>
             <HwToggle
               on={metro.enabled}
               onClick={() => pushMetro({ ...metro, enabled: !metro.enabled })}
@@ -1859,10 +1856,6 @@ function PianoPreview({
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-function midiToName(midi: number) {
-  return `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
-}
-
 function padRoman(degree: number, scale: "major" | "minor", secondary: Secondary) {
   const base = romanFor(degree, scale);
   if (secondary === "none") return base;
@@ -2228,7 +2221,13 @@ function StrumPlate({
       data-on={enabled ? "true" : undefined}
       data-armed={enabled && armed ? "true" : undefined}
       role="application"
-      aria-label="Strum plate"
+      aria-label={
+        enabled
+          ? armed
+            ? "Strum plate. Drag left or right across strings."
+            : "Strum plate. Arm a chord pad first."
+          : "Strum plate. Strum mode is off."
+      }
       style={{
         cursor: enabled ? "ew-resize" : "default",
       }}
@@ -2251,26 +2250,6 @@ function StrumPlate({
         ref={canvasRef}
         className="pointer-events-none absolute inset-0 h-full w-full"
       />
-      <div className="pointer-events-none absolute inset-0">
-        {notes.map((midi, i) => {
-          const color = stringColor(i, notes.length);
-          const x = stringCenterX(i, notes.length);
-          return (
-            <span
-              key={`${midi}-${i}`}
-              className="absolute bottom-2 font-[family-name:var(--font-departure-mono)] text-[10px] font-medium"
-              style={{
-                left: `${x * 100}%`,
-                transform: "translateX(-50%)",
-                color,
-                opacity: 0.55,
-              }}
-            >
-              {midiToName(midi)}
-            </span>
-          );
-        })}
-      </div>
       {pick != null && (
         <div
           className="pointer-events-none absolute z-10"
@@ -2284,15 +2263,6 @@ function StrumPlate({
           <div className="absolute left-1/2 top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 bg-[var(--cream)]" />
         </div>
       )}
-      {!enabled ? (
-        <p className="pointer-events-none absolute inset-x-3 top-2 z-10 text-[11px] leading-4 text-[var(--muted)]">
-          Strum off
-        </p>
-      ) : !armed ? (
-        <p className="pointer-events-none absolute inset-x-3 top-2 z-10 text-[11px] leading-4 text-[var(--muted)]">
-          Arm a pad, then strum left or right
-        </p>
-      ) : null}
     </div>
   );
 }
