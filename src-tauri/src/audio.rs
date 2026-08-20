@@ -332,9 +332,8 @@ impl StreamAudioProcessor {
         self.events.clear();
         if let Some((port, prefers_midi)) = self.note_port {
             for bytes in &self.raw_midi {
-                self.events.push(
-                    &MidiEvent::new(0, port, *bytes).with_flags(EventFlags::IS_LIVE),
-                );
+                self.events
+                    .push(&MidiEvent::new(0, port, *bytes).with_flags(EventFlags::IS_LIVE));
             }
             for n in &self.generated {
                 midi::push_note(

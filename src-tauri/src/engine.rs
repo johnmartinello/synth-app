@@ -185,8 +185,7 @@ impl Default for EngineSettings {
 /// MIDI white keys in any octave map to degrees 1–7 (C=I … B=vii).
 /// Oct− / Oct+ on a controller only transpose the notes it sends, so this
 /// keeps degree pads working after an octave shift.
-/// Not used while `ChordType::is_piano()` — those notes stay written MIDI,
-/// then shift by `piano_transposed` from Oct 4.
+/// Not used while `ChordType::is_piano()` — those notes stay absolute MIDI.
 pub fn midi_to_degree(note: u8) -> Option<u8> {
     match note % 12 {
         0 => Some(1),
@@ -198,18 +197,6 @@ pub fn midi_to_degree(note: u8) -> Option<u8> {
         11 => Some(7),
         _ => None,
     }
-}
-
-/// Shift a written MIDI note so Oct 4 is identity (C4 stays 60).
-pub fn piano_transposed(key: u8, octave: i8) -> u8 {
-    let delta = (octave.clamp(1, 7) as i16 - 4) * 12;
-    (i16::from(key) + delta).clamp(0, 127) as u8
-}
-
-/// Inverse of [`piano_transposed`]: concert MIDI → Oct-4 identity.
-pub fn piano_identity(key: u8, octave: i8) -> u8 {
-    let delta = (octave.clamp(1, 7) as i16 - 4) * 12;
-    (i16::from(key) - delta).clamp(0, 127) as u8
 }
 
 /// Scientific pitch octave for a MIDI note (C4 = 60 → 4).
@@ -757,20 +744,13 @@ impl AudioEngine {
         out: &mut Vec<GeneratedNote>,
     ) {
         let new_len = len.min(MAX_CHORD_NOTES as u8) as usize;
-        let old = self.chord[..self.chord_len as usize].to_vec();
-        let new = notes[..new_len].to_vec();
-        self.drop_roll_not_in(&new);
-        for key in &old {
-            if !new.contains(key) {
-                self.note_off_ex(time, *key, out, true);
-            }
+        let old_notes = self.chord;
+        let old_len = self.chord_len as usize;
+        self.clear_roll();
+        for &key in &old_notes[..old_len] {
+            self.note_off_ex(time, key, out, true);
         }
-        let entering: Vec<u8> = new
-            .iter()
-            .copied()
-            .filter(|key| !old.contains(key))
-            .collect();
-        self.schedule_roll_ons(time, &entering, out);
+        self.schedule_roll_ons(time, &notes[..new_len], out);
         self.chord = notes;
         self.chord_len = new_len as u8;
         self.last_chord = self.chord;
@@ -815,19 +795,6 @@ impl AudioEngine {
         self.roll_key[i] = key;
         self.roll_vel[i] = vel;
         self.roll_len += 1;
-    }
-
-    fn drop_roll_not_in(&mut self, keep: &[u8]) {
-        let mut w = 0u8;
-        for i in 0..self.roll_len as usize {
-            if keep.contains(&self.roll_key[i]) {
-                self.roll_remain[w as usize] = self.roll_remain[i];
-                self.roll_key[w as usize] = self.roll_key[i];
-                self.roll_vel[w as usize] = self.roll_vel[i];
-                w += 1;
-            }
-        }
-        self.roll_len = w;
     }
 
     fn clear_roll(&mut self) {
@@ -1338,18 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn piano_transpose_is_identity_at_octave_4() {
-        assert_eq!(piano_transposed(57, 4), 57);
-        assert_eq!(piano_transposed(60, 4), 60);
-        assert_eq!(piano_transposed(60, 5), 72);
-        assert_eq!(piano_transposed(60, 3), 48);
-        assert_eq!(piano_transposed(127, 7), 127);
-        assert_eq!(piano_transposed(0, 1), 0);
-        assert_eq!(piano_identity(72, 5), 60);
-        assert_eq!(piano_identity(piano_transposed(57, 3), 3), 57);
-    }
-
-    #[test]
     fn type_1_is_piano_not_a_chord_density() {
         assert!(ChordType::Single.is_piano());
         assert!(!ChordType::Triad.is_piano());
@@ -1361,16 +1316,8 @@ mod tests {
         let mut eng = AudioEngine::new(48_000.0);
         instant_env(&mut eng);
         let mut out = Vec::new();
-        eng.handle(
-            EngineEvent::ChromaticOn { key: 57, vel: 100 },
-            0,
-            &mut out,
-        );
-        eng.handle(
-            EngineEvent::ChromaticOn { key: 60, vel: 90 },
-            0,
-            &mut out,
-        );
+        eng.handle(EngineEvent::ChromaticOn { key: 57, vel: 100 }, 0, &mut out);
+        eng.handle(EngineEvent::ChromaticOn { key: 60, vel: 90 }, 0, &mut out);
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
         assert_eq!(ons, vec![57, 60]);
     }
@@ -1382,11 +1329,7 @@ mod tests {
         let mut out = Vec::new();
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, &mut out);
         out.clear();
-        eng.handle(
-            EngineEvent::ChromaticOn { key: 61, vel: 100 },
-            0,
-            &mut out,
-        );
+        eng.handle(EngineEvent::ChromaticOn { key: 61, vel: 100 }, 0, &mut out);
         assert!(out.iter().any(|n| n.on && n.key == 61));
     }
 
@@ -2037,7 +1980,12 @@ mod tests {
         eng.handle(env_event(0.0, 0.1, 0.0, 0.0, 1.0, 0.2), 0, &mut sink);
     }
 
-    fn arm_and_strum(eng: &mut AudioEngine, notes: [u8; MAX_CHORD_NOTES], len: u8, out: &mut Vec<GeneratedNote>) {
+    fn arm_and_strum(
+        eng: &mut AudioEngine,
+        notes: [u8; MAX_CHORD_NOTES],
+        len: u8,
+        out: &mut Vec<GeneratedNote>,
+    ) {
         eng.handle(EngineEvent::SetStrumMode { enabled: true }, 0, out);
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, out);
         eng.handle(
@@ -2140,7 +2088,10 @@ mod tests {
         );
         let (stage, _, after) = eng.env_playhead();
         assert_eq!(stage, 2, "new stroke must restart Attack");
-        assert!((after - level).abs() < 1e-5, "gain must not snap, got {after}");
+        assert!(
+            (after - level).abs() < 1e-5,
+            "gain must not snap, got {after}"
+        );
     }
 
     #[test]
@@ -2161,14 +2112,7 @@ mod tests {
         em[1] = 64;
         em[2] = 67;
         out.clear();
-        eng.handle(
-            EngineEvent::ChordOn {
-                notes: em,
-                len: 3,
-            },
-            0,
-            &mut out,
-        );
+        eng.handle(EngineEvent::ChordOn { notes: em, len: 3 }, 0, &mut out);
         assert_eq!(eng.env_playhead().0, 6);
         assert!((eng.env_playhead().2 - level_before).abs() < 1e-5);
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
@@ -2278,31 +2222,21 @@ mod tests {
     }
 
     #[test]
-    fn stacked_chords_append_notes() {
+    fn block_chord_change_retriggers_entire_voicing() {
         let mut eng = AudioEngine::new(48_000.0);
         let mut out = Vec::new();
         let (notes, len) = triad();
         eng.handle(EngineEvent::ChordOn { notes, len }, 0, &mut out);
         out.clear();
-        let mut stacked = [0u8; MAX_CHORD_NOTES];
-        stacked[0] = 60;
-        stacked[1] = 64;
-        stacked[2] = 67;
-        stacked[3] = 62;
-        stacked[4] = 65;
-        stacked[5] = 69;
-        eng.handle(
-            EngineEvent::ChordOn {
-                notes: stacked,
-                len: 6,
-            },
-            0,
-            &mut out,
-        );
+        let mut em = [0u8; MAX_CHORD_NOTES];
+        em[0] = 59;
+        em[1] = 64;
+        em[2] = 67;
+        eng.handle(EngineEvent::ChordOn { notes: em, len: 3 }, 0, &mut out);
         let offs: Vec<u8> = out.iter().filter(|n| !n.on).map(|n| n.key).collect();
         let ons: Vec<u8> = out.iter().filter(|n| n.on).map(|n| n.key).collect();
-        assert!(offs.is_empty());
-        assert_eq!(ons, vec![62, 65, 69]);
+        assert_eq!(offs, vec![60, 64, 67]);
+        assert_eq!(ons, vec![59, 64, 67]);
     }
 
     #[test]

@@ -8,8 +8,8 @@ use crate::audio::activate_to_stream;
 pub use crate::audio::FilterMode;
 use crate::discovery::{self, DiscoveryReport};
 use crate::engine::{
-    midi_octave, midi_to_degree, piano_identity, piano_transposed, sanitize_roll_ms, ArpMode, ChordType,
-    EngineEvent, EngineSettings, ScaleKind, Secondary, MAX_CHORD_NOTES,
+    midi_octave, midi_to_degree, sanitize_roll_ms, ArpMode, ChordType, EngineEvent, EngineSettings,
+    ScaleKind, Secondary, MAX_CHORD_NOTES,
 };
 use crate::envelope::EnvelopeParams;
 use crate::looper::{LooperEvent, LooperStatus};
@@ -53,8 +53,13 @@ use wmidi::MidiMessage;
 pub enum MainThreadMessage {
     RunOnMainThread,
     GuiClosed,
-    GuiRequestResized { new_size: GuiSize },
-    PresetLoaded { path: String, key: Option<String> },
+    GuiRequestResized {
+        new_size: GuiSize,
+    },
+    PresetLoaded {
+        path: String,
+        key: Option<String>,
+    },
     /// Surge does not report GUI patch picks via preset-load; clap-juce maps
     /// `patchChanged` to `mark_dirty` / param rescan instead.
     PluginPatchMaybeChanged,
@@ -541,12 +546,7 @@ fn apply_remembered_preset(status: &mut HostStatus, path: &str) {
     status.current_preset = Some(crate::presets::display_name_for(path));
 }
 
-fn apply_plugin_preset(
-    app: &AppHandle,
-    status: &mut HostStatus,
-    path: &str,
-    key: Option<&str>,
-) {
+fn apply_plugin_preset(app: &AppHandle, status: &mut HostStatus, path: &str, key: Option<&str>) {
     let presets = crate::presets::list_all();
     if let Some(info) = crate::presets::resolve_path(&presets, path) {
         apply_matched_preset(app, status, info);
@@ -876,7 +876,13 @@ fn copy_controls(status: &mut HostStatus, settings: &EngineSettings, midi_clock:
 }
 
 fn piano_note_on(prod: &mut Producer<EngineEvent>, key: u8, vel: u8) {
-    push_engine(prod, EngineEvent::ChromaticOn { key, vel: vel.max(1) });
+    push_engine(
+        prod,
+        EngineEvent::ChromaticOn {
+            key,
+            vel: vel.max(1),
+        },
+    );
 }
 
 fn piano_note_off(prod: &mut Producer<EngineEvent>, key: u8) {
@@ -915,9 +921,7 @@ fn send_piano_voicing(
     held_pads: &[u8],
 ) {
     let mut packed = Vec::new();
-    for &key in piano_keys {
-        packed.push(piano_transposed(key, settings.octave));
-    }
+    packed.extend_from_slice(piano_keys);
     for &degree in held_pads {
         packed.extend(crate::engine::chord_notes_vec(settings, degree));
     }
@@ -930,17 +934,16 @@ fn follow_midi_octave(
     status: &mut HostStatus,
     midi_clock: bool,
     app: Option<&AppHandle>,
-) -> bool {
+) {
     let oct = midi_octave(key).clamp(1, 7);
     if oct == settings.octave {
-        return false;
+        return;
     }
     settings.octave = oct;
     copy_controls(status, settings, midi_clock);
     if let Some(app) = app {
         emit_status(app, status);
     }
-    true
 }
 
 fn piano_midi_press(
@@ -954,9 +957,8 @@ fn piano_midi_press(
     key: u8,
 ) {
     follow_midi_octave(settings, key, status, midi_clock, app);
-    let id = piano_identity(key, settings.octave);
-    if !piano_keys.contains(&id) {
-        piano_keys.push(id);
+    if !piano_keys.contains(&key) {
+        piano_keys.push(key);
     }
     send_piano_voicing(prod, settings, piano_keys, held_pads);
 }
@@ -968,8 +970,7 @@ fn piano_midi_release(
     prod: &mut Producer<EngineEvent>,
     key: u8,
 ) {
-    let id = piano_identity(key, settings.octave);
-    piano_keys.retain(|&k| k != id);
+    piano_keys.retain(|&k| k != key);
     if settings.arp_enabled && settings.arp_latch {
         return;
     }
@@ -1039,10 +1040,7 @@ fn persist_learn(app: &AppHandle, map: &MidiLearnMap) {
 
 fn push_envelope(prod: &mut Producer<EngineEvent>, envelope: &EnvelopeParams) {
     let env = envelope.sanitized();
-    push_engine(
-        prod,
-        EngineEvent::SetEnvelope(env),
-    );
+    push_engine(prod, EngineEvent::SetEnvelope(env));
 }
 
 fn apply_filter(status: &mut HostStatus, value: f32, app: Option<&AppHandle>) {
@@ -1478,15 +1476,7 @@ fn handle_incoming_midi(
     }
     let slice = bytes.as_slice();
     if to_surge {
-        handle_surge_midi(
-            slice,
-            settings,
-            prod,
-            midi_clock,
-            metro,
-            status,
-            app,
-        );
+        handle_surge_midi(slice, settings, prod, midi_clock, metro, status, app);
         return;
     }
     if slice.len() == 1 {
@@ -1622,10 +1612,7 @@ fn handle_incoming_midi(
                     }
                     settings.arp_enabled = !settings.arp_enabled;
                     push_arp(prod, settings);
-                    if !settings.arp_enabled
-                        && held_pads.is_empty()
-                        && piano_keys.is_empty()
-                    {
+                    if !settings.arp_enabled && held_pads.is_empty() && piano_keys.is_empty() {
                         push_engine(prod, EngineEvent::ChordOff);
                     }
                     copy_controls(status, settings, midi_clock.live);

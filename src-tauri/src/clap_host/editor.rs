@@ -121,7 +121,10 @@ mod win {
             let state = unsafe { &mut *self.state };
             EditorEvent {
                 closed: state.close,
-                resize: state.resize.take().map(|(width, height)| GuiSize { width, height }),
+                resize: state
+                    .resize
+                    .take()
+                    .map(|(width, height)| GuiSize { width, height }),
             }
         }
 
@@ -287,7 +290,11 @@ mod win {
         }
     }
 
-    pub fn midi_targets_surge(app_hwnd: Option<isize>, editor_hwnd: Option<isize>, last: bool) -> bool {
+    pub fn midi_targets_surge(
+        app_hwnd: Option<isize>,
+        editor_hwnd: Option<isize>,
+        last: bool,
+    ) -> bool {
         let fg = unsafe { GetForegroundWindow() };
         if fg.is_null() {
             return last;

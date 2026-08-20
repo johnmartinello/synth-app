@@ -234,10 +234,7 @@ export default function Home() {
 
   const previewNotes = useMemo(() => {
     if (piano) {
-      const delta = (octave - 4) * 12;
-      return (engineNotes ?? []).map((n) =>
-        Math.max(0, Math.min(127, n - delta)),
-      );
+      return engineNotes ?? [];
     }
     if (held.size > 0) {
       const all = [...held].flatMap((degree) =>
@@ -2088,7 +2085,7 @@ function StrumPlate({
           return (
             <span
               key={`${midi}-${i}`}
-              className="absolute bottom-2 font-[family-name:var(--font-geist-mono)] text-[10px] font-medium"
+              className="absolute bottom-2 font-[family-name:var(--font-departure-mono)] text-[10px] font-medium"
               style={{
                 left: `${x * 100}%`,
                 transform: "translateX(-50%)",

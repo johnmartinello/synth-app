@@ -332,7 +332,8 @@ fn normalize_category(category: &str) -> String {
 }
 
 fn memchr_meta(data: &[u8]) -> Option<usize> {
-    data.windows(5).position(|w| w.eq_ignore_ascii_case(b"<meta"))
+    data.windows(5)
+        .position(|w| w.eq_ignore_ascii_case(b"<meta"))
 }
 
 fn xml_attr(tag: &str, key: &str) -> Option<String> {
