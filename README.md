@@ -1,6 +1,7 @@
 # Surge Chord
 
 Desktop chord instrument at `D:\projetos\synth-app`. Tauri 2 + Next.js UI, Rust audio/MIDI. Hosts the **Surge XT CLAP already installed on this machine** — Surge is never copied or bundled.
+<img width="1908" height="896" alt="{994F7E7B-42CC-4F31-80F2-32A2F065459C}" src="https://github.com/user-attachments/assets/8058b474-b0bb-451c-b96b-649045fc34c7" />
 
 ## Run
 
